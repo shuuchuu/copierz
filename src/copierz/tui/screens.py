@@ -1,11 +1,10 @@
-"""Modal and secondary screens: adding a repo, and reviewing/resolving an update."""
+"""Modal/secondary screens: scanning for repos, reviewing/resolving an update."""
 
 from __future__ import annotations
 
 import os
 import shlex
 import subprocess
-from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
 from textual.binding import Binding
@@ -17,16 +16,18 @@ from copierz import git
 from copierz.updater import ChangedFile, UpdateError, commit_update, review_changes
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from textual.app import ComposeResult
 
     from copierz.models import BranchStatus
 
 
-class AddRepoScreen(ModalScreen[tuple[str, str, str] | None]):
-    """Prompt for a repo path, branch, and template path to start tracking."""
+class ScanRootScreen(ModalScreen[str | None]):
+    """Prompt for a root directory to scan for Copier-tracked repos."""
 
     CSS = """
-    AddRepoScreen {
+    ScanRootScreen {
         align: center middle;
     }
     #dialog {
@@ -45,35 +46,31 @@ class AddRepoScreen(ModalScreen[tuple[str, str, str] | None]):
     }
     """
 
+    def __init__(self, initial_root: str) -> None:
+        super().__init__()
+        self.initial_root = initial_root
+
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label("Track a new repo/branch")
-            yield Input(placeholder="Repo path", id="repo_path")
-            yield Input(
-                placeholder="Branch (default: repo's current branch)", id="branch"
+            yield Label(
+                "Scan for git repos with a .copier-answers.yml under a root directory"
             )
-            yield Input(placeholder="Template path", id="template_path")
+            yield Input(
+                value=self.initial_root, placeholder="Root directory", id="root"
+            )
             with Horizontal(id="buttons"):
                 yield Button("Cancel", id="cancel")
-                yield Button("Add", id="add", variant="primary")
+                yield Button("Scan", id="scan", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "cancel":
             self.dismiss(None)
             return
-        repo_path = self.query_one("#repo_path", Input).value.strip()
-        branch = self.query_one("#branch", Input).value.strip()
-        template_path = self.query_one("#template_path", Input).value.strip()
-        if not repo_path or not template_path:
+        root = self.query_one("#root", Input).value.strip()
+        if not root:
             self.app.bell()
             return
-        if not branch:
-            try:
-                branch = git.current_branch(Path(repo_path).expanduser())
-            except git.GitError:
-                self.app.bell()
-                return
-        self.dismiss((repo_path, branch, template_path))
+        self.dismiss(root)
 
 
 class ReviewScreen(Screen[None]):

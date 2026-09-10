@@ -12,17 +12,17 @@ from textual.widgets import DataTable, Footer, Header, Static
 
 from copierz.config import (
     Config,
-    TemplateSource,
     TrackedRepo,
     default_config_path,
     load_config,
     save_config,
 )
+from copierz.discovery import scan_and_track
 from copierz.models import BranchStatus, StatusKind
 from copierz.status import compute_all_statuses, compute_branch_status
 from copierz.updater import UpdateError, run_update
 
-from .screens import AddRepoScreen, ReviewScreen
+from .screens import ReviewScreen, ScanRootScreen
 
 STATUS_STYLE = {
     StatusKind.UP_TO_DATE: "green",
@@ -44,7 +44,7 @@ class CopierzApp(App[None]):
         Binding("f", "fetch_refresh", "Fetch + refresh"),
         Binding("u", "update_selected", "Update"),
         Binding("enter", "review_selected", "Review / resolve"),
-        Binding("a", "add_repo", "Add repo"),
+        Binding("a", "add_repo", "Scan for repos"),
         Binding("x", "remove_selected", "Stop tracking"),
         Binding("q", "quit", "Quit"),
     ]
@@ -76,7 +76,7 @@ class CopierzApp(App[None]):
         self.statuses = compute_all_statuses(self.config, fetch=fetch)
         self._render_table()
         if not self.config.repos:
-            self.set_message("No repos tracked yet. Press 'a' to add one.")
+            self.set_message("No repos tracked yet. Press 'a' to scan for some.")
 
     def _render_table(self) -> None:
         table = self.query_one(DataTable)
@@ -141,32 +141,25 @@ class CopierzApp(App[None]):
         self.push_screen(ReviewScreen(status.repo_path, status))
 
     def action_add_repo(self) -> None:
-        def handle_result(result: tuple[str, str, str] | None) -> None:
-            if result is None:
+        def handle_result(root_str: str | None) -> None:
+            if root_str is None:
                 return
-            path_str, branch, template_path_str = result
-            path = Path(path_str).expanduser().resolve()
-            template_path = Path(template_path_str).expanduser().resolve()
-
-            template = next(
-                (t for t in self.config.templates if t.path == template_path), None
-            )
-            if template is None:
-                template = TemplateSource(name=template_path.name, path=template_path)
-                self.config.templates.append(template)
-
-            repo = self.config.repo_by_path(path)
-            if repo is None:
-                repo = TrackedRepo(path=path, template=template.name, branches=[])
-                self.config.repos.append(repo)
-            if branch not in repo.branches:
-                repo.branches.append(branch)
-
+            root = Path(root_str).expanduser().resolve()
+            summary = scan_and_track(self.config, root)
             save_config(self.config, self.config_path)
             self.refresh_statuses()
-            self.set_message(f"Tracking {path.name}@{branch}.")
 
-        self.push_screen(AddRepoScreen(), handle_result)
+            message = (
+                f"Scanned {root}: found {summary.repos_found} repo(s), "
+                f"{summary.branches_found} branch(es); "
+                f"added {summary.templates_added} template(s), "
+                f"{summary.branches_added} new branch(es)."
+            )
+            if summary.warnings:
+                message += " " + "; ".join(summary.warnings)
+            self.set_message(message)
+
+        self.push_screen(ScanRootScreen(str(Path.cwd())), handle_result)
 
     def action_remove_selected(self) -> None:
         status = self._selected_status()

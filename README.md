@@ -8,23 +8,35 @@ from one place.
 ## Configuring
 
 copierz reads `~/.config/copierz/config.toml` (or `$XDG_CONFIG_HOME`, or
-`--config PATH`). You can create it by hand, or press `a` in the TUI:
+`--config PATH`):
 
 ```toml
 [[templates]]
-name = "shuuchuu"
+name = "template"
 path = "/home/mog/repos/shuuchuu/template"
+workspace_root = "/home/mog/repos/shuuchuu"
 # workspace_root defaults to path's parent directory. Set it explicitly if
 # the template's `_src_path` in tracked repos is relative to something else.
 
 [[repos]]
 path = "/home/mog/repos/shuuchuu/caesar-cipher"
-template = "shuuchuu"
+template = "template"
 branches = ["main", "solution"]
 ```
 
-Only branches listed under `branches` are tracked; add/remove them from the
-TUI (`a` / `x`) or by editing the file.
+You normally don't write this by hand: press `a` in the TUI and give it a
+root directory (e.g. `/home/mog/repos/shuuchuu`). copierz recursively scans
+under that root for git repos, checks *every local branch* of each one (via
+`git show branch:.copier-answers.yml`, no checkout needed) for a Copier
+answers file, and adds any repo/branch it finds — creating a `[[templates]]`
+entry from each answers file's `_src_path` the first time it's seen
+(resolving a relative `_src_path` against the scanned root, matching how
+`copier copy`/`update` would). It stops descending once it finds a `.git`
+directory (so a vendored repo nested inside a tracked one is left alone) and
+skips hidden directories. Scanning again is safe — it only adds what's
+missing, never removes anything.
+
+Stop tracking a repo/branch with `x`, or by editing the file directly.
 
 ## Running
 
@@ -42,7 +54,7 @@ $ copierz status --fetch
 | `f`     | `git fetch` every tracked repo, then refresh      |
 | `u`     | Run `copier update` on the selected branch        |
 | `enter` | Open the review/resolve screen for the selection |
-| `a`     | Track a new repo/branch                          |
+| `a`     | Scan a root directory for repos/branches to track |
 | `x`     | Stop tracking the selected repo/branch            |
 | `q`     | Quit                                              |
 
