@@ -1,0 +1,68 @@
+[project]
+authors = [
+  {name = "m09", email = "142691+m09@users.noreply.github.com"},
+]
+dependencies = [
+  "copier >= 9.9, < 10",
+  "packaging >= 24",
+  "pyyaml >= 6, < 7",
+  "textual >= 8, < 9",
+  "tomli-w >= 1.2, < 2",
+]
+description = "TUI to track and manage Copier updates across a fleet of git repositories."
+homepage = "https://github.com/shuuchuu/copierz"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+name = "copierz"
+readme = "README.md"
+requires-python = ">= 3.12"
+version = "0.1.0"
+
+[project.scripts]
+copierz = "copierz.cli:main"
+
+[dependency-groups]
+dev = [
+  "bumpver >= 2025.1131",
+  "doit >= 0.37",
+  "pytest >= 8",
+  "pytest-asyncio >= 1, < 2",
+  "ruff >= 0.11",
+  "ty >= 0.0.33",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+ignore = ["D1", "D203", "D213", "RUF067"]
+preview = true
+select = ["A", "B", "C", "D", "DOC", "E", "EM", "F", "I", "N", "PIE", "PTH", "RET", "RUF", "SIM", "SLF", "TC", "UP", "W"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[bumpver]
+commit = true
+tag = true
+push = true
+commit_message = "Bump version to {new_version}"
+current_version = "0.1.0"
+tag_message = "{new_version}"
+version_pattern = "MAJOR.MINOR.PATCH"
+
+[bumpver.file_patterns]
+"pyproject.toml" = [
+  '^version = "{version}"$',
+  '^current_version = "{version}"$',
+]
+"src/copierz/__init__.py" = [
+  '^__version__ = "{version}"$',
+]
+
+[build-system]
+build-backend = "uv_build"
+requires = ["uv_build>=0.11,<0.12.0"]
