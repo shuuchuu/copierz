@@ -9,9 +9,9 @@ DOIT_CONFIG = {
 def task_check():
     return {
         "actions": [
-            "uv run ruff check src/ tests",
-            "uv run ruff format --check src/ tests",
-            "uv run ty check src/ tests",
+            "uv run ruff check src/copierz tests",
+            "uv run ruff format --check src/copierz tests",
+            "uv run ty check src/copierz tests",
         ],
     }
 
