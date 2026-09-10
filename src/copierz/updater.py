@@ -70,7 +70,7 @@ def run_update(config: Config, repo: TrackedRepo, branch: str) -> None:
         )
         raise UpdateError(msg)
 
-    with _chdir(template.resolved_workspace_root()):
+    with _chdir(repo.resolved_workspace_root()):
         copier.run_update(
             dst_path=repo.path,
             defaults=True,

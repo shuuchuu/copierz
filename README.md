@@ -14,27 +14,31 @@ copierz reads `~/.config/copierz/config.toml` (or `$XDG_CONFIG_HOME`, or
 [[templates]]
 name = "template"
 path = "/home/mog/repos/shuuchuu/template"
-workspace_root = "/home/mog/repos/shuuchuu"
-# workspace_root defaults to path's parent directory. Set it explicitly if
-# the template's `_src_path` in tracked repos is relative to something else.
 
 [[repos]]
 path = "/home/mog/repos/shuuchuu/caesar-cipher"
 template = "template"
 branches = ["main", "solution"]
+# workspace_root defaults to the repo's own parent directory (here,
+# /home/mog/repos/shuuchuu) — the directory Copier's relative `_src_path` is
+# resolved against, which is virtually always wherever `copier copy` was run
+# from, i.e. the repo's own parent. Set it explicitly only if a repo's
+# template was copied from somewhere else.
 ```
 
 You normally don't write this by hand: press `a` in the TUI and give it a
-root directory (e.g. `/home/mog/repos/shuuchuu`). copierz recursively scans
-under that root for git repos, checks *every local branch* of each one (via
-`git show branch:.copier-answers.yml`, no checkout needed) for a Copier
-answers file, and adds any repo/branch it finds — creating a `[[templates]]`
-entry from each answers file's `_src_path` the first time it's seen
-(resolving a relative `_src_path` against the scanned root, matching how
-`copier copy`/`update` would). It stops descending once it finds a `.git`
-directory (so a vendored repo nested inside a tracked one is left alone) and
-skips hidden directories. Scanning again is safe — it only adds what's
-missing, never removes anything.
+root directory (e.g. `/home/mog/repos`). copierz recursively scans under
+that root for git repos, checks *every local branch* of each one (via `git
+show branch:.copier-answers.yml`, no checkout needed) for a Copier answers
+file, and adds any repo/branch it finds — creating a `[[templates]]` entry
+from each answers file's `_src_path` the first time it's seen (resolving a
+relative `_src_path` against *that repo's own parent directory*, not the
+scanned root — so it works even when scanning from several levels above,
+or across repos that recorded their template path relative to different
+directories). It stops descending once it finds a `.git` directory (so a
+vendored repo nested inside a tracked one is left alone) and skips hidden
+directories. Scanning again is safe — it only adds what's missing, never
+removes anything.
 
 Stop tracking a repo/branch with `x`, or by editing the file directly.
 

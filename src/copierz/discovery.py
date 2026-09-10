@@ -67,15 +67,20 @@ def _iter_git_repo_roots(path: Path) -> list[Path]:
     return found
 
 
-def resolve_template_path(answers: Answers, workspace_root: Path) -> Path:
+def resolve_template_path(answers: Answers, base_dir: Path) -> Path:
     """Resolve `answers.src_path`, which Copier may have recorded as relative.
+
+    A relative `_src_path` is relative to wherever `copier copy` was
+    originally run from, which is virtually always the repo's own parent
+    directory (see `TrackedRepo.resolved_workspace_root`) — pass that as
+    `base_dir`.
 
     Returns:
         The absolute, resolved path to the template.
     """
     src_path = Path(answers.src_path).expanduser()
     if not src_path.is_absolute():
-        src_path = workspace_root / src_path
+        src_path = base_dir / src_path
     return src_path.resolve()
 
 
@@ -105,8 +110,9 @@ def scan_and_track(config: Config, root: Path) -> ScanSummary:
     )
 
     for repo in discovered:
+        base_dir = repo.path.parent
         template_paths = Counter(
-            resolve_template_path(b.answers, root) for b in repo.branches
+            resolve_template_path(b.answers, base_dir) for b in repo.branches
         )
         chosen_path, _ = template_paths.most_common(1)[0]
         if len(template_paths) > 1:
@@ -117,9 +123,7 @@ def scan_and_track(config: Config, root: Path) -> ScanSummary:
 
         template = next((t for t in config.templates if t.path == chosen_path), None)
         if template is None:
-            template = TemplateSource(
-                name=chosen_path.name, path=chosen_path, workspace_root=root
-            )
+            template = TemplateSource(name=chosen_path.name, path=chosen_path)
             config.templates.append(template)
             summary.templates_added += 1
 
@@ -129,7 +133,7 @@ def scan_and_track(config: Config, root: Path) -> ScanSummary:
             config.repos.append(tracked)
 
         for branch in repo.branches:
-            branch_template_path = resolve_template_path(branch.answers, root)
+            branch_template_path = resolve_template_path(branch.answers, base_dir)
             if branch_template_path != chosen_path:
                 summary.warnings.append(
                     f"{repo.path.name}@{branch.branch}: skipped, "

@@ -154,3 +154,55 @@ def test_run_update_switches_branch_when_clean(
 def test_commit_update_raises_when_nothing_to_commit(rendered_project: Path) -> None:
     with pytest.raises(UpdateError):
         commit_update(rendered_project, "tmpl", "0.2.0")
+
+
+def test_run_update_resolves_relative_src_path_against_repos_own_parent(
+    tmp_path: Path,
+) -> None:
+    # Regression test: the template and the tracked repo deliberately do NOT
+    # share a parent directory (unlike the `real_template`/`rendered_project`
+    # fixtures above, which live side by side under the same tmp_path and so
+    # can't catch a resolution bug like this). This mirrors a real reported
+    # case: a repo at .../repos/mog/invoicez recording `_src_path: ../shuuchuu/
+    # template`, relative to its own parent .../repos/mog, while the template
+    # itself lives under a sibling of .../repos/mog named .../repos/shuuchuu.
+    workspace = tmp_path / "workspace"
+    template = _init_repo(workspace / "shuuchuu" / "template")
+    (template / "copier.yml").write_text(
+        "_subdirectory: template\ngreeting:\n  type: str\n  default: hello\n"
+    )
+    template_dir = template / "template"
+    template_dir.mkdir()
+    (template_dir / "greeting.txt.jinja").write_text("{{ greeting }}\n")
+    (template_dir / "{{_copier_conf.answers_file}}.jinja").write_text(
+        "# Changes here will be overwritten by Copier\n"
+        "{{ _copier_answers|to_nice_yaml -}}\n"
+    )
+    _git(template, "add", ".")
+    _git(template, "commit", "-q", "-m", "v1")
+    _git(template, "tag", "0.1.0")
+    (template_dir / "greeting.txt.jinja").write_text("{{ greeting }} world\n")
+    _git(template, "add", ".")
+    _git(template, "commit", "-q", "-m", "v2")
+    _git(template, "tag", "0.2.0")
+
+    repo = _init_repo(workspace / "elsewhere" / "project")
+    (repo / "greeting.txt").write_text("hello\n")
+    (repo / ".copier-answers.yml").write_text(
+        "# Changes here will be overwritten by Copier\n"
+        "_commit: 0.1.0\n"
+        "_src_path: ../shuuchuu/template\n"
+        "greeting: hello\n"
+    )
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-q", "-m", "initial")
+
+    branch = git.current_branch(repo)
+    template_source = TemplateSource(name="tmpl", path=template)
+    tracked = TrackedRepo(path=repo, template="tmpl", branches=[branch])
+    config = Config(templates=[template_source], repos=[tracked])
+
+    run_update(config, tracked, branch)
+
+    assert (repo / "greeting.txt").read_text() == "hello world\n"
+    assert git.unmerged_files(repo) == []

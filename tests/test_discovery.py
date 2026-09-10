@@ -167,6 +167,37 @@ def test_scan_and_track_reuses_existing_template_by_path(tmp_path: Path) -> None
     assert config.repos[0].template == "mine"
 
 
+def test_scan_and_track_resolves_relative_src_path_per_repo(tmp_path: Path) -> None:
+    # Regression test: scanning from an ancestor above where a repo's
+    # relative `_src_path` was originally recorded (its own parent
+    # directory) must not corrupt the resolved template path. Mirrors a
+    # real case: scanning from .../repos while one repo lives directly
+    # under .../repos/shuuchuu (relative to it) and another lives under
+    # .../repos/mog/invoicez, recording `_src_path: ../shuuchuu/template`
+    # relative to .../repos/mog.
+    root = tmp_path / "repos"
+    template = root / "shuuchuu" / "template"
+    template.mkdir(parents=True)
+
+    sibling_repo = _init_repo(root / "shuuchuu" / "proj")
+    _commit_answers(sibling_repo, "template")
+
+    nested_repo = _init_repo(root / "mog" / "invoicez")
+    _commit_answers(nested_repo, "../shuuchuu/template")
+
+    config = Config()
+
+    summary = scan_and_track(config, root)
+
+    assert summary.warnings == []
+    assert summary.templates_added == 1
+    assert len(config.templates) == 1
+    assert config.templates[0].path == template.resolve()
+    tracked_templates = {r.path: r.template for r in config.repos}
+    assert tracked_templates[sibling_repo] == config.templates[0].name
+    assert tracked_templates[nested_repo] == config.templates[0].name
+
+
 def test_scan_and_track_warns_on_conflicting_templates_per_repo(tmp_path: Path) -> None:
     template_a = tmp_path / "template-a"
     template_a.mkdir()
