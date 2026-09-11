@@ -94,3 +94,41 @@ def commit(repo: Path, message: str) -> None:
 
 def diff_for_file(repo: Path, file_path: str) -> str:
     return _run(repo, "diff", "HEAD", "--", file_path, check=False).stdout
+
+
+def difftool(repo: Path, file_path: str | None = None) -> None:
+    """Launch the user's configured `git difftool` against HEAD.
+
+    Blocks until the tool is closed. Uses whatever `diff.tool` (meld,
+    vscode, etc.) is set in the user's git config; `-y` skips the
+    per-file "launch tool?" prompt.
+    """
+    args = ["difftool", "-y", "HEAD"]
+    if file_path is not None:
+        args += ["--", file_path]
+    subprocess.run(["git", "-C", str(repo), *args], check=False)
+
+
+def difftool_dir_diff(repo: Path) -> None:
+    """Launch the user's configured `git difftool` in whole-repo dir-diff mode.
+
+    Compares the working tree against HEAD as two directories in a single
+    tool invocation. If the tool supports editing (meld, vscode's diff
+    editor), edits made there are copied back into the working tree once
+    the tool exits.
+    """
+    subprocess.run(
+        ["git", "-C", str(repo), "difftool", "--dir-diff", "-y", "HEAD"], check=False
+    )
+
+
+def mergetool(repo: Path, file_path: str | None = None) -> None:
+    """Launch the user's configured `git mergetool` on unmerged files.
+
+    Blocks until the tool is closed. Presents a proper 3-way merge and
+    marks each file resolved (staged) once its result is saved.
+    """
+    args = ["mergetool", "-y"]
+    if file_path is not None:
+        args += ["--", file_path]
+    subprocess.run(["git", "-C", str(repo), *args], check=False)

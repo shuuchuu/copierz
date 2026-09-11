@@ -10,6 +10,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header, Static
 
+from copierz import git
 from copierz.config import (
     Config,
     TrackedRepo,
@@ -125,6 +126,14 @@ class CopierzApp(App[None]):
         except UpdateError as exc:
             self.set_message(f"[red]Update failed:[/red] {exc}")
             return
+        new_status = compute_branch_status(self.config, repo, status.branch)
+
+        with self.suspend():
+            if new_status.status is StatusKind.CONFLICTS:
+                git.mergetool(repo.path)
+            elif new_status.status is StatusKind.DIRTY:
+                git.difftool_dir_diff(repo.path)
+
         new_status = compute_branch_status(self.config, repo, status.branch)
         self.statuses[self.statuses.index(status)] = new_status
         self._render_table()

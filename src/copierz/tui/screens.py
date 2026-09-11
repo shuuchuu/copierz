@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import subprocess
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from textual.app import ComposeResult
 
     from copierz.models import BranchStatus
+    from copierz.tui.app import CopierzApp
 
 
 class ScanRootScreen(ModalScreen[str | None]):
@@ -79,7 +80,8 @@ class ReviewScreen(Screen[None]):
     BINDINGS: ClassVar = [
         Binding("e", "edit_selected", "Edit in $EDITOR"),
         Binding("s", "stage_selected", "Stage / mark resolved"),
-        Binding("d", "diff_selected", "View diff"),
+        Binding("d", "diff_selected", "Diff/merge selected"),
+        Binding("D", "diff_all", "View full diff"),
         Binding("c", "commit", "Commit"),
         Binding("escape", "back", "Back"),
     ]
@@ -141,18 +143,27 @@ class ReviewScreen(Screen[None]):
         self.refresh_changes()
 
     def action_diff_selected(self) -> None:
+        """Open the selected file in the user's configured git difftool/mergetool.
+
+        Conflicted files get a proper 3-way `git mergetool`, which also
+        marks the file resolved (staged) once its result is saved; other
+        changed files get a plain `git difftool` against HEAD.
+        """
         changed_file = self._selected_file()
         if changed_file is None:
             return
-        pager = os.environ.get("PAGER", "less")
-        repo = shlex.quote(str(self.repo_path))
-        target = shlex.quote(changed_file.path)
         with self.app.suspend():
-            subprocess.run(
-                f"git -C {repo} diff HEAD -- {target} | {pager}",
-                shell=True,
-                check=False,
-            )
+            if changed_file.conflicted:
+                git.mergetool(self.repo_path, changed_file.path)
+            else:
+                git.difftool(self.repo_path, changed_file.path)
+        self.refresh_changes()
+
+    def action_diff_all(self) -> None:
+        """Open every changed file at once in a whole-repo dir-diff view."""
+        with self.app.suspend():
+            git.difftool_dir_diff(self.repo_path)
+        self.refresh_changes()
 
     def action_commit(self) -> None:
         try:
@@ -166,4 +177,5 @@ class ReviewScreen(Screen[None]):
         self.query_one("#review_message", Static).update("Committed.")
 
     def action_back(self) -> None:
+        cast("CopierzApp", self.app).refresh_statuses()
         self.app.pop_screen()
