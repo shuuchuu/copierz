@@ -1,6 +1,5 @@
 __pycache__/
 .doit.json
-
 .pytest_cache/
 .ruff_cache/
 .venv/

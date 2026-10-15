@@ -24,7 +24,6 @@ def task_test():
     }
 
 
-
 def task_install_hooks():
     import os
 

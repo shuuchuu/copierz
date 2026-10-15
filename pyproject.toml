@@ -25,7 +25,7 @@ dev = [
   "bumpver >= 2025.1131",
   "doit >= 0.37",
   "pytest >= 8",
-  "ruff >= 0.11",
+  "ruff >= 0.16",
   "ty >= 0.0.33",
 ]
 
@@ -33,7 +33,12 @@ dev = [
 target-version = "py312"
 
 [tool.ruff.lint]
-ignore = ["D1", "D203", "D213", "RUF067"]
+ignore = [
+  "D1",
+  "incorrect-blank-line-before-class",
+  "multi-line-summary-second-line",
+  "non-empty-init-module",
+]
 preview = true
 select = ["A", "B", "C", "D", "DOC", "E", "EM", "F", "I", "N", "PIE", "PTH", "RET", "RUF", "SIM", "SLF", "TC", "UP", "W"]
 
@@ -46,6 +51,7 @@ tag = true
 push = true
 commit_message = "Bump version to {new_version}"
 current_version = "0.1.0"
+pre_commit_hook = "scripts/bumpver_pre_commit.sh"
 tag_message = "{new_version}"
 version_pattern = "MAJOR.MINOR.PATCH"
 
@@ -60,4 +66,4 @@ version_pattern = "MAJOR.MINOR.PATCH"
 
 [build-system]
 build-backend = "uv_build"
-requires = ["uv_build>=0.11,<0.12.0"]
+requires = ["uv_build>=0.12.15,<0.13.0"]
