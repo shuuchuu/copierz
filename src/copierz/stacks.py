@@ -22,23 +22,29 @@ def _is_stacked_on(repo: Path, branch: str, parent: str) -> int | None:
     """Whether `branch` sits on top of `parent`, possibly pending a rebase.
 
     That's the case when `branch` has commits of its own past their merge
-    base, and `parent` has none past it except template updates (commits
-    touching the answers file) — i.e. `branch` was in sync with `parent`
+    base, and either `parent` has none past it except template updates
+    (commits touching the answers file), or `parent` was rewritten (rebased)
+    since `branch` forked from it — i.e. `branch` was in sync with `parent`
     until `parent` got updated.
 
     Returns:
-        How deep the merge base is (higher means a closer parent), or `None`
+        How deep the fork point is (higher means a closer parent), or `None`
         if `branch` isn't stacked on `parent`.
     """
+    tip = git.rev_parse(repo, branch)
     base = git.merge_base(repo, branch, parent)
-    if base is None or base == git.rev_parse(repo, branch):
+    if base is None or base == tip:
         return None
     parent_only = f"{base}..{parent}"
-    if git.count_commits(repo, parent_only) != git.count_commits(
+    if git.count_commits(repo, parent_only) == git.count_commits(
         repo, parent_only, ANSWERS_FILE
     ):
-        return None
-    return git.count_commits(repo, base)
+        return git.count_commits(repo, base)
+    # The reflog of `parent` knows its tips from before a rebase.
+    fork = git.fork_point(repo, parent, branch)
+    if fork is not None and fork != tip and not git.is_ancestor(repo, fork, parent):
+        return git.count_commits(repo, fork)
+    return None
 
 
 def find_parents(repo: Path, branches: list[str]) -> dict[str, str | None]:

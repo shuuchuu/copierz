@@ -112,6 +112,11 @@ def rev_parse(repo: Path, ref: str) -> str:
     return _run(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").stdout.strip()
 
 
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    args = ["merge-base", "--is-ancestor", ancestor, descendant]
+    return _run(repo, *args, check=False).returncode == 0
+
+
 def merge_base(repo: Path, a: str, b: str) -> str | None:
     result = _run(repo, "merge-base", a, b, check=False)
     return result.stdout.strip() if result.returncode == 0 else None

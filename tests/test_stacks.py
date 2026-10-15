@@ -55,3 +55,20 @@ def test_mutually_stacked_branches_get_a_root(project: Path) -> None:
     parents = find_parents(project, ["a", "b"])
 
     assert parents == {"a": None, "b": "a"}
+
+
+def test_still_stacked_on_a_parent_rebased_since(project: Path) -> None:
+    # A rebase of solution, on gui, stopped and was aborted after gui and
+    # solution were rebased: gradio still points at the old solution.
+    _branch_with_commit(project, "gui", "main", "gui.txt")
+    _branch_with_commit(project, "solution", "gui", "solution.txt")
+    _branch_with_commit(project, "gradio", "solution", "gradio.txt")
+    git_out(project, "checkout", "-q", "main")
+    commit_file(project, "main.txt", "x\n", "unrelated work on main")
+    for branch, parent in [("gui", "main"), ("solution", "gui")]:
+        git_out(project, "checkout", "-q", branch)
+        git_out(project, "rebase", "-q", parent)
+
+    parents = find_parents(project, ["main", "gui", "solution", "gradio"])
+
+    assert parents["gradio"] == "solution"
