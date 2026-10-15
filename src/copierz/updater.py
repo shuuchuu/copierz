@@ -135,7 +135,7 @@ class Updater:
                 OutcomeKind.FAILED,
                 f"stacked on {parent} but behind it; update it by hand",
             )
-        return self._rebase(target, parent)
+        return self.rebase(target, parent)
 
     def checkout(self, target: Target) -> Path:
         """Where `target`'s branch is checked out, adding a worktree if nowhere.
@@ -215,11 +215,15 @@ class Updater:
         self.release(target, checkout)
         return Outcome(target, OutcomeKind.UPDATED, versions)
 
-    def _rebase(self, target: Target, parent: str) -> Outcome:
+    def rebase(self, target: Target, parent: str) -> Outcome:
         checkout = self.checkout(target)
         if not git.is_clean(checkout):
             return Outcome(target, OutcomeKind.SKIPPED, "dirty", checkout)
-        if git.rebase(checkout, parent) or self._drive_rebase(checkout):
+        # If the parent was itself just rebased, a plain `git rebase parent`
+        # would also replay the parent's old commits under the branch: only
+        # replay the branch's own commits, from where it forked.
+        upstream = git.fork_point(target.repo, parent, target.branch)
+        if git.rebase(checkout, parent, upstream) or self._drive_rebase(checkout):
             self.release(target, checkout)
             return Outcome(target, OutcomeKind.REBASED, f"onto {parent}")
         if git.is_rebasing(checkout):

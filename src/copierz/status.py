@@ -65,6 +65,12 @@ def repo_statuses(targets: list[Target], latest: LatestRefs) -> list[BranchStatu
     by_branch = {t.branch: t for t in targets}
     parents = find_parents(repo, list(by_branch))
     checkouts = git.worktrees(repo)
+    tips = {git.rev_parse(repo, branch): branch for branch in by_branch}
+    for branch, checkout in checkouts.items():
+        # Mid-rebase, the branch still points at its old commits: what it's
+        # being rebased onto is the reliable parent.
+        if branch in by_branch and (onto := git.rebase_onto(checkout)) in tips:
+            parents[branch] = tips[onto]
     return [
         branch_status(by_branch[branch], parents[branch], checkouts.get(branch), latest)
         for branch in topological_order(parents)

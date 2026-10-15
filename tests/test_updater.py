@@ -230,3 +230,31 @@ def test_resume_continues_a_rebase_resolved_by_hand(
     assert git.show_file_at_ref(project, "solution", "greeting.txt") == (
         "hello world solution\n"
     )
+
+
+def test_rebase_replays_only_own_commits_when_parent_was_rewritten(
+    project: Path, updater: Updater
+) -> None:
+    # ghcli's case: gradio sits on solution, on gui, on main. Once gui is
+    # rebased onto an updated main, its commit's patch changes; rebasing
+    # solution, then gradio, must not replay gui's old commit under them.
+    commit_file(project, "f.txt", "a\nb\nc\nd\ne\n", "base")
+    git_out(project, "checkout", "-q", "-b", "gui")
+    commit_file(project, "f.txt", "a\nb\nC\nd\ne\n", "Add GUI starting point")
+    git_out(project, "checkout", "-q", "-b", "solution")
+    commit_file(project, "f.txt", "a\nb\nCC\nd\ne\n", "Add GUI")
+    git_out(project, "checkout", "-q", "-b", "gradio")
+    commit_file(project, "h.txt", "gradio\n", "Add gradio UI")
+    git_out(project, "checkout", "-q", "main")
+    commit_file(project, "f.txt", "A\nb\nc\nd\ne\n", "Change main")
+    git_out(project, "checkout", "-q", "gui")
+    git_out(project, "rebase", "-q", "main")
+    _move_away(project)
+
+    statuses = _statuses(project)
+    for branch, parent in [("solution", "gui"), ("gradio", "solution")]:
+        outcome = updater.rebase(statuses[branch].target, parent)
+        assert outcome.kind is OutcomeKind.REBASED, (branch, outcome.detail)
+
+    assert git_out(project, "log", "--format=%s", "solution..gradio") == "Add gradio UI"
+    assert git_out(project, "log", "--format=%s", "gui..solution") == "Add GUI"

@@ -153,13 +153,46 @@ def is_rebasing(checkout: Path) -> bool:
     return False
 
 
-def rebase(checkout: Path, onto: str) -> bool:
+def fork_point(repo: Path, parent: str, branch: str) -> str | None:
+    """Where `branch` forked from `parent`, even if `parent` was rewritten since.
+
+    Uses `parent`'s reflog, which records its tips before any rebase.
+
+    Returns:
+        The fork point's sha, or `None` if the reflog doesn't tell.
+    """
+    result = _run(repo, "merge-base", "--fork-point", parent, branch, check=False)
+    return result.stdout.strip() or None
+
+
+def rebase(checkout: Path, onto: str, upstream: str | None = None) -> bool:
     """Rebase the checked-out branch onto `onto`.
+
+    Args:
+        checkout: Where the branch to rebase is checked out.
+        onto: What to rebase it onto.
+        upstream: Only replay the commits after this one (`--onto` form);
+            by default, those not in `onto`.
 
     Returns:
         True if it completed, False if it stopped (normally on conflicts).
     """
-    return _run(checkout, "rebase", "--quiet", onto, check=False).returncode == 0
+    args = ["--onto", onto, upstream] if upstream else [onto]
+    return _run(checkout, "rebase", "--quiet", *args, check=False).returncode == 0
+
+
+def rebase_onto(checkout: Path) -> str | None:
+    """The commit a stopped rebase is replaying onto, if one is in progress.
+
+    Returns:
+        The commit's sha, or `None`.
+    """
+    for name in ("rebase-merge", "rebase-apply"):
+        git_path = _run(checkout, "rev-parse", "--git-path", f"{name}/onto").stdout
+        onto = checkout / git_path.strip()
+        if onto.is_file():
+            return onto.read_text().strip()
+    return None
 
 
 def rebase_continue(checkout: Path) -> bool:
