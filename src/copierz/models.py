@@ -33,6 +33,7 @@ class BranchStatus:
             worktree), if anywhere.
         latest_ref: The template's latest version, if it could be resolved.
         detail: A human-readable explanation, mostly for non-trivial kinds.
+        unmerged: Files with unresolved conflicts, for `CONFLICTS`.
     """
 
     target: Target
@@ -41,6 +42,7 @@ class BranchStatus:
     checkout: Path | None = None
     latest_ref: str | None = None
     detail: str = ""
+    unmerged: tuple[str, ...] = ()
 
     @property
     def current_ref(self) -> str | None:

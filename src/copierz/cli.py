@@ -1,8 +1,9 @@
-"""Command-line interface: status, update, resolve, abort, log."""
+"""Command-line interface: status, update, resolve, continue, abort, log."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from copierz.models import BranchStatus
 
 console = Console(highlight=False)
+error_console = Console(highlight=False, stderr=True)
 
 STATUS_STYLE = {
     StatusKind.UP_TO_DATE: "green",
@@ -179,6 +181,39 @@ def _print_summary(statuses: list[BranchStatus]) -> None:
     console.print(summary)
 
 
+def _status_json(status: BranchStatus) -> dict[str, object]:
+    return {
+        "repo": str(status.target.repo),
+        "branch": status.target.branch,
+        "template": str(status.target.template),
+        "status": status.kind.name.lower(),
+        "current": status.current_ref,
+        "latest": status.latest_ref,
+        "parent": status.parent,
+        "checkout": str(status.checkout) if status.checkout else None,
+        "unmerged": list(status.unmerged),
+        "detail": status.detail,
+    }
+
+
+def _outcome_json(outcome: Outcome) -> dict[str, object]:
+    return {
+        "repo": str(outcome.target.repo),
+        "branch": outcome.target.branch,
+        "outcome": outcome.kind.name.lower(),
+        "checkout": str(outcome.checkout) if outcome.checkout else None,
+        "detail": outcome.detail,
+    }
+
+
+def _emit(data: object) -> None:
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
+def _stopped(outcomes: list[Outcome]) -> bool:
+    return any(o.kind is not OutcomeKind.SKIPPED and not o.kind.ok for o in outcomes)
+
+
 def _report(outcome: Outcome) -> None:
     line = Text(f"{outcome.target.label}  ", style="bold")
     line.append(outcome.kind.value, style=OUTCOME_STYLE[outcome.kind])
@@ -194,7 +229,7 @@ def _updater(args: argparse.Namespace) -> Updater:
         default_cache_dir(),
         commit=not getattr(args, "no_commit", False),
         verify=not getattr(args, "no_verify", False),
-        report=_report,
+        report=None if args.json else _report,
     )
 
 
@@ -206,6 +241,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
     statuses = compute_statuses(targets)
     if args.selectors:
         statuses = _select(statuses, args.selectors)
+    if args.json:
+        _emit({"branches": [_status_json(s) for s in statuses]})
+        return 0
     if not statuses:
         console.print("No Copier-generated repos found under the configured roots.")
         return 0
@@ -223,15 +261,15 @@ def _cmd_update(args: argparse.Namespace) -> int:
     outcomes = []
     for repo_statuses_ in _by_repo(selected).values():
         outcomes.extend(updater.update_repo(repo_statuses_))
-    if not outcomes:
+    if args.json:
+        _emit({"outcomes": [_outcome_json(o) for o in outcomes]})
+    elif not outcomes:
         console.print(Text("Everything is up to date.", style="green"))
-        return 0
-    stopped = [
-        o for o in outcomes if o.kind is not OutcomeKind.SKIPPED and not o.kind.ok
-    ]
-    if any(o.kind in {OutcomeKind.CONFLICTS, OutcomeKind.UNCOMMITTED} for o in stopped):
+    elif any(
+        o.kind in {OutcomeKind.CONFLICTS, OutcomeKind.UNCOMMITTED} for o in outcomes
+    ):
         console.print(Text("Next: `copierz resolve`", style="dim"))
-    return 1 if stopped else 0
+    return 1 if _stopped(outcomes) else 0
 
 
 def _ask(prompt: str, choices: str, default: str) -> str:
@@ -259,13 +297,10 @@ def _merge_step(updater: Updater, status: BranchStatus, checkout: Path) -> bool 
 
 
 def _rebase_step(updater: Updater, status: BranchStatus, checkout: Path) -> bool | None:
-    if git.rebase_continue(checkout):
-        updater.release(status.target, checkout)
-        _report(Outcome(status.target, OutcomeKind.REBASED, f"onto {status.parent}"))
-        return True
-    if git.is_rebasing(checkout) and git.unmerged_files(checkout):
+    outcome = updater.resume(status)
+    if outcome.kind is OutcomeKind.CONFLICTS and git.unmerged_files(checkout):
         return None
-    console.print(f"`git rebase --continue` failed in {_pretty(checkout)}")
+    _report(outcome)
     return True
 
 
@@ -328,23 +363,56 @@ def _cmd_resolve(args: argparse.Namespace) -> int:
         touched.add(status.target.repo)
         if not _resolve_one(updater, status):
             break
-    # Rebase whatever is stacked on the branches just committed.
-    latest = LatestRefs()
-    for repo in sorted(touched):
-        repo_targets = [t for t in targets if t.repo == repo]
-        refreshed = repo_statuses(refresh(repo_targets), latest)
-        updater.update_repo(refreshed)
+    _follow_up(updater, targets, touched)
     return 0
+
+
+def _follow_up(
+    updater: Updater, targets: list[Target], repos: set[Path]
+) -> list[Outcome]:
+    """Rebase whatever is stacked on branches whose update just got committed.
+
+    Returns:
+        The outcomes of those rebases.
+    """
+    latest = LatestRefs()
+    outcomes = []
+    for repo in sorted(repos):
+        repo_targets = refresh(t for t in targets if t.repo == repo)
+        outcomes.extend(updater.update_repo(repo_statuses(repo_targets, latest)))
+    return outcomes
+
+
+def _cmd_continue(args: argparse.Namespace) -> int:
+    targets = _load_targets(args)
+    statuses = compute_statuses(targets)
+    if args.selectors:
+        statuses = _select(statuses, args.selectors)
+    updater = _updater(args)
+    outcomes = []
+    for status in statuses:
+        if status.kind in PENDING:
+            outcome = updater.resume(status)
+            updater.report(outcome)
+            outcomes.append(outcome)
+    resumed = {o.target.repo for o in outcomes if o.kind.ok}
+    outcomes.extend(_follow_up(updater, targets, resumed))
+    if args.json:
+        _emit({"outcomes": [_outcome_json(o) for o in outcomes]})
+    elif not outcomes:
+        console.print("Nothing to continue.")
+    return 1 if _stopped(outcomes) else 0
 
 
 def _cmd_abort(args: argparse.Namespace) -> int:
     targets = _load_targets(args)
+    if args.json and not args.yes:
+        msg = "abort --json can't ask for confirmation: pass --yes too"
+        raise UsageError(msg)
     statuses = _select(compute_statuses(targets), args.selectors)
     pending = [s for s in statuses if s.kind in PENDING]
-    if not pending:
-        console.print("No stopped update or rebase among the selected branches.")
-        return 0
     updater = _updater(args)
+    aborted = []
     for status in pending:
         checkout = status.checkout
         if checkout is None:
@@ -360,7 +428,13 @@ def _cmd_abort(args: argparse.Namespace) -> int:
             ):
                 continue
         updater.abort(status)
-        console.print(f"{status.target.label}: aborted")
+        aborted.append(status)
+        if not args.json:
+            console.print(f"{status.target.label}: aborted")
+    if args.json:
+        _emit({"aborted": [_status_json(s) | {"status": "aborted"} for s in aborted]})
+    elif not pending:
+        console.print("No stopped update or rebase among the selected branches.")
     return 0
 
 
@@ -377,20 +451,43 @@ def _cmd_log(args: argparse.Namespace) -> int:
     for status in statuses:
         if status.latest_ref is not None:
             by_template[status.target.template].append(status)
+    report = []
     for template, template_statuses in sorted(by_template.items()):
-        latest = template_statuses[0].latest_ref
+        latest = template_statuses[0].latest_ref or "HEAD"
         in_use: dict[str, list[str]] = defaultdict(list)
         for status in template_statuses:
             in_use[status.current_ref or "?"].append(status.target.label)
         oldest = min(in_use, key=_version_key)
+        commits = git.log_entries(template, f"{oldest}..{latest}")
+        report.append(
+            {
+                "template": str(template),
+                "oldest": oldest,
+                "latest": latest,
+                "commits": [
+                    {"sha": sha, "subject": subject, "refs": refs}
+                    for sha, subject, refs in commits
+                ],
+                "in_use": {
+                    ref: in_use[ref] for ref in sorted(in_use, key=_version_key)
+                },
+            }
+        )
+        if args.json:
+            continue
         console.rule(Text(f"{template.name}  {oldest} → {latest}", style="bold"))
-        if oldest != latest:
-            console.print(git.log_oneline(template, f"{oldest}..{latest}"), end="")
+        for sha, subject, refs in commits:
+            line = Text(f"{sha} ", style="yellow")
+            if refs:
+                line.append(f"({refs}) ", style="cyan")
+            console.print(line + Text(subject))
         for ref in sorted(in_use, key=_version_key):
             console.print(
                 Text(f"{ref}: ", style="bold")
                 + Text(", ".join(in_use[ref]), style="dim")
             )
+    if args.json:
+        _emit({"templates": report})
     return 0
 
 
@@ -411,12 +508,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="directory to scan instead of the configured roots (repeatable)",
     )
-    parser.set_defaults(func=_cmd_status, selectors=[], fetch=False)
+    parser.set_defaults(func=_cmd_status, selectors=[], fetch=False, json=False)
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     selector_help = "REPO or REPO@BRANCH (REPO: directory name or path, `.` for cwd)"
+    machine = argparse.ArgumentParser(add_help=False)
+    machine.add_argument(
+        "--json", action="store_true", help="print a JSON document instead of text"
+    )
 
     status = subparsers.add_parser(
-        "status", help="show where each branch stands (default)"
+        "status", parents=[machine], help="show where each branch stands (default)"
     )
     status.add_argument("selectors", nargs="*", metavar="SELECTOR", help=selector_help)
     status.add_argument(
@@ -426,6 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     update = subparsers.add_parser(
         "update",
+        parents=[machine],
         help="update branches to their template's latest version",
         description=(
             "Run `copier update` on each stack's bottom branch and rebase the "
@@ -459,7 +561,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     resolve.set_defaults(func=_cmd_resolve)
 
-    abort = subparsers.add_parser("abort", help="throw away a stopped update or rebase")
+    continue_ = subparsers.add_parser(
+        "continue",
+        parents=[machine],
+        help="non-interactively commit/continue stopped updates once resolved",
+        description=(
+            "For each stopped update or rebase without unmerged files left: "
+            "commit the update, or continue the rebase; then rebase the "
+            "branches stacked on it. The scriptable counterpart of `resolve`, "
+            "for when conflicts were fixed by hand (and `git add`ed)."
+        ),
+    )
+    continue_.add_argument(
+        "selectors", nargs="*", metavar="SELECTOR", help=selector_help
+    )
+    continue_.add_argument(
+        "--no-verify", action="store_true", help="skip pre-commit hooks when committing"
+    )
+    continue_.set_defaults(func=_cmd_continue)
+
+    abort = subparsers.add_parser(
+        "abort", parents=[machine], help="throw away a stopped update or rebase"
+    )
     abort.add_argument("selectors", nargs="+", metavar="SELECTOR", help=selector_help)
     abort.add_argument(
         "--yes", action="store_true", help="don't ask before discarding changes"
@@ -467,7 +590,9 @@ def build_parser() -> argparse.ArgumentParser:
     abort.set_defaults(func=_cmd_abort)
 
     log = subparsers.add_parser(
-        "log", help="show template changes since the oldest version in use"
+        "log",
+        parents=[machine],
+        help="show template changes since the oldest version in use",
     )
     log.set_defaults(func=_cmd_log)
 
@@ -480,6 +605,6 @@ def main() -> None:
     try:
         code = args.func(args)
     except (UsageError, ConfigError) as exc:
-        console.print(Text(f"copierz: {exc}", style="red"))
+        error_console.print(Text(f"copierz: {exc}", style="red"))
         code = 2
     raise SystemExit(code)

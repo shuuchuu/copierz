@@ -21,6 +21,7 @@ import copier
 
 from copierz import git
 from copierz.models import StatusKind
+from copierz.template_source import ANSWERS_FILE
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -218,7 +219,7 @@ class Updater:
         checkout = self.checkout(target)
         if not git.is_clean(checkout):
             return Outcome(target, OutcomeKind.SKIPPED, "dirty", checkout)
-        if git.rebase(checkout, parent):
+        if git.rebase(checkout, parent) or self._drive_rebase(checkout):
             self.release(target, checkout)
             return Outcome(target, OutcomeKind.REBASED, f"onto {parent}")
         if git.is_rebasing(checkout):
@@ -226,6 +227,56 @@ class Updater:
                 target, OutcomeKind.CONFLICTS, f"rebasing onto {parent}", checkout
             )
         return Outcome(target, OutcomeKind.FAILED, f"rebase onto {parent} failed")
+
+    @staticmethod
+    def _drive_rebase(checkout: Path) -> bool:
+        """Carry a stopped rebase on while only the answers file conflicts.
+
+        Within a stack, the answers file follows the parent branch: a
+        conflict there comes from a stale template update made on the branch
+        itself, and the parent's version is the newer one. A commit left
+        empty by that is skipped.
+
+        Returns:
+            True once the rebase is complete, False if it stopped on other
+            conflicts (or for any other reason).
+        """
+        while git.is_rebasing(checkout):
+            unmerged = git.unmerged_files(checkout)
+            if unmerged == [ANSWERS_FILE]:
+                git.take_ours(checkout, ANSWERS_FILE)
+            elif unmerged:
+                return False
+            if not git.rebase_continue(checkout) and not git.unmerged_files(checkout):
+                return False
+        return True
+
+    def resume(self, status: BranchStatus) -> Outcome:
+        """Carry on a stopped update or rebase whose conflicts are resolved.
+
+        Returns:
+            REBASED or UPDATED (or UNCOMMITTED, see `finish`) when done, or
+            CONFLICTS if unmerged files remain.
+        """
+        target, checkout = status.target, status.checkout
+        if checkout is None:
+            return Outcome(target, OutcomeKind.SKIPPED, "nothing to resume")
+        if unmerged := git.unmerged_files(checkout):
+            detail = f"still unmerged: {', '.join(unmerged)}"
+            return Outcome(target, OutcomeKind.CONFLICTS, detail, checkout)
+        if not git.is_rebasing(checkout):
+            return self.finish(status, checkout)
+        if self._drive_rebase(checkout):
+            self.release(target, checkout)
+            return Outcome(target, OutcomeKind.REBASED, f"onto {status.parent}")
+        if git.is_rebasing(checkout):
+            return Outcome(
+                target,
+                OutcomeKind.CONFLICTS,
+                f"rebasing onto {status.parent}",
+                checkout,
+            )
+        return Outcome(target, OutcomeKind.FAILED, "git rebase --continue failed")
 
     def abort(self, status: BranchStatus) -> None:
         """Throw away a stopped update or rebase, back to the branch's last commit."""

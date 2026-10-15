@@ -36,6 +36,7 @@ $ copierz status --fetch     # git fetch every repo first
 $ copierz update --all       # update everything that's behind
 $ copierz update ghcli       # one repo (or REPO@BRANCH, a path, `.` for cwd)
 $ copierz resolve            # finish whatever stopped on conflicts
+$ copierz continue           # same, non-interactively, once fixed by hand
 $ copierz abort ghcli@main   # throw away a stopped update or rebase
 $ copierz log                # template changes since the oldest version in use
 ```
@@ -45,6 +46,27 @@ to review them first, `--no-verify` to skip pre-commit hooks). Anything
 that stops on conflicts is left for `copierz resolve`, which walks each one
 through your `git mergetool`, then offers to review the result in your
 `git difftool` and commit it.
+
+## Scripting and agents
+
+`status`, `update`, `continue`, `abort` and `log` take `--json` to print a
+single JSON document on stdout (errors go to stderr, exit code 2):
+
+- `status --json`: `{"branches": [{repo, branch, template, status,
+  current, latest, parent, checkout, unmerged, detail}]}`, with `status`
+  one of `up_to_date`, `behind`, `blocked`, `in_progress`, `conflicts`,
+  `error`.
+- `update --json` / `continue --json`: `{"outcomes": [{repo, branch,
+  outcome, checkout, detail}]}`, with `outcome` one of `updated`,
+  `rebased`, `uncommitted`, `conflicts`, `skipped`, `failed`. The exit code
+  is 1 if anything stopped (conflicts, uncommitted, failed).
+- `abort --json --yes`: `{"aborted": [...]}`, same fields as `status`.
+- `log --json`: `{"templates": [{template, oldest, latest, commits: [{sha,
+  subject, refs}], in_use: {version: ["repo@branch", ...]}}]}`.
+
+`resolve` is interactive; the non-interactive path is to edit the files
+listed under `unmerged` in the `checkout` directory, `git add` them, and run
+`copierz continue`.
 
 ## Stacked branches
 
@@ -60,8 +82,12 @@ tree.
 stack, and rebases the branches above onto their parent once it's done.
 Selecting any branch of a stack updates the whole stack. A branch that
 stops on conflicts holds back the branches stacked on it, until `copierz
-resolve` finishes it and rebases them. Rebasing rewrites those branches, so
-pushing them afterwards needs `--force-with-lease`.
+resolve` (or `continue`) finishes it and rebases them. During these rebases
+the answers file follows the parent: a conflict there only comes from a
+stale template update made on the branch itself, so it's resolved with the
+parent's version, and a commit left empty by that is dropped. Rebasing
+rewrites those branches, so pushing them afterwards needs
+`--force-with-lease`.
 
 ## Worktrees
 

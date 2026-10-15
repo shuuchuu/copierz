@@ -68,21 +68,35 @@ def show_file_at_ref(repo: Path, ref: str, file_path: str) -> str | None:
 def worktrees(repo: Path) -> dict[str, Path]:
     """Map each branch checked out anywhere (main checkout included) to its path.
 
+    A worktree in the middle of a rebase is detached, but still counts as
+    holding the branch being rebased.
+
     Returns:
-        A `{branch: worktree path}` dict, skipping detached HEADs and
+        A `{branch: worktree path}` dict, skipping other detached HEADs and
         worktrees whose directory no longer exists.
     """
     out = _run(repo, "worktree", "list", "--porcelain").stdout
     result: dict[str, Path] = {}
     for block in out.split("\n\n"):
         fields = dict(line.partition(" ")[::2] for line in block.splitlines())
-        if "worktree" not in fields or "branch" not in fields:
+        if "worktree" not in fields:
             continue
         path = Path(fields["worktree"])
         if "prunable" in fields or not path.is_dir():
             continue
-        result[fields["branch"].removeprefix("refs/heads/")] = path
+        branch = fields.get("branch") or _rebasing_branch(path)
+        if branch:
+            result[branch.removeprefix("refs/heads/")] = path
     return result
+
+
+def _rebasing_branch(checkout: Path) -> str | None:
+    for name in ("rebase-merge", "rebase-apply"):
+        git_path = _run(checkout, "rev-parse", "--git-path", f"{name}/head-name")
+        head_name = checkout / git_path.stdout.strip()
+        if head_name.is_file():
+            return head_name.read_text().strip()
+    return None
 
 
 def worktree_add(repo: Path, path: Path, branch: str) -> None:
@@ -151,13 +165,22 @@ def rebase(checkout: Path, onto: str) -> bool:
 def rebase_continue(checkout: Path) -> bool:
     """Continue a stopped rebase, keeping each commit message as is.
 
+    A commit whose changes all turned out to be upstream already (nothing
+    left staged once its conflicts are resolved) is skipped instead.
+
     Returns:
         True if the rebase completed, False if it stopped again.
     """
-    result = _run(
-        checkout, "rebase", "--continue", check=False, env={"GIT_EDITOR": "true"}
-    )
+    nothing_staged = _run(checkout, "diff", "--cached", "--quiet", check=False)
+    action = "--skip" if nothing_staged.returncode == 0 else "--continue"
+    result = _run(checkout, "rebase", action, check=False, env={"GIT_EDITOR": "true"})
     return result.returncode == 0
+
+
+def take_ours(checkout: Path, file_path: str) -> None:
+    """Resolve a conflict with HEAD's version (the new base, during a rebase)."""
+    _run(checkout, "checkout", "--ours", "--", file_path)
+    _run(checkout, "add", "--", file_path)
 
 
 def rebase_abort(checkout: Path) -> None:
@@ -185,8 +208,18 @@ def commit(checkout: Path, message: str, verify: bool = True) -> None:
     _run(checkout, *args)
 
 
-def log_oneline(repo: Path, revision_range: str) -> str:
-    return _run(repo, "log", "--oneline", "--decorate", revision_range).stdout
+def log_entries(repo: Path, revision_range: str) -> list[tuple[str, str, str]]:
+    """List commits in `revision_range`, newest first.
+
+    Returns:
+        `(short sha, subject, ref names)` tuples, ref names as `%D` prints them.
+    """
+    out = _run(repo, "log", "--format=%h%x00%s%x00%D", revision_range).stdout
+    entries = []
+    for line in out.splitlines():
+        sha, subject, refs = line.split("\0")
+        entries.append((sha, subject, refs))
+    return entries
 
 
 def difftool_dir_diff(checkout: Path) -> None:

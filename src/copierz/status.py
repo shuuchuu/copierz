@@ -11,6 +11,7 @@ from copierz.stacks import find_parents, topological_order
 from copierz.template_source import ANSWERS_FILE, latest_template_ref
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from pathlib import Path
 
     from copierz.discovery import Target
@@ -74,9 +75,14 @@ def branch_status(
     target: Target, parent: str | None, checkout: Path | None, latest: LatestRefs
 ) -> BranchStatus:
     def status(
-        kind: StatusKind, detail: str = "", ref: str | None = None
+        kind: StatusKind,
+        detail: str = "",
+        ref: str | None = None,
+        unmerged: Iterable[str] = (),
     ) -> BranchStatus:
-        return BranchStatus(target, kind, parent, checkout, ref, detail)
+        return BranchStatus(
+            target, kind, parent, checkout, ref, detail, tuple(unmerged)
+        )
 
     if not target.template.is_dir():
         return status(StatusKind.ERROR, f"template not found at {target.template}")
@@ -86,12 +92,18 @@ def branch_status(
         return status(StatusKind.ERROR, str(exc))
 
     if checkout is not None:
+        unmerged = git.unmerged_files(checkout)
         if git.is_rebasing(checkout):
             return status(
-                StatusKind.CONFLICTS, f"rebase onto {parent} stopped", latest_ref
+                StatusKind.CONFLICTS,
+                f"rebase onto {parent} stopped",
+                latest_ref,
+                unmerged,
             )
-        if unmerged := git.unmerged_files(checkout):
-            return status(StatusKind.CONFLICTS, f"in {', '.join(unmerged)}", latest_ref)
+        if unmerged:
+            return status(
+                StatusKind.CONFLICTS, f"in {', '.join(unmerged)}", latest_ref, unmerged
+            )
         if ANSWERS_FILE in git.changed_vs_head(checkout):
             return status(StatusKind.IN_PROGRESS, "update not committed", latest_ref)
 

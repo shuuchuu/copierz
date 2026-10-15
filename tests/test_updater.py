@@ -182,3 +182,51 @@ def test_missing_template_is_an_error(tmp_path: Path) -> None:
 
     assert status.kind is StatusKind.ERROR
     assert "template not found" in status.detail
+
+
+def test_stale_template_updates_on_stacked_branches_are_dropped(
+    project: Path, updater: Updater
+) -> None:
+    # What per-branch updates left behind in linting: each branch got its
+    # own update commit, so the stack no longer lines up. Rebasing settles
+    # the answers file on the parent's version and drops the empty commit.
+    git_out(project, "checkout", "-q", "-b", "solution")
+    commit_file(project, "solution.txt", "42\n", "Add solution")
+    answers = (project / ".copier-answers.yml").read_text()
+    stale = answers.replace("_commit: 0.1.0", "_commit: 0.1.0-1-gstale")
+    commit_file(project, ".copier-answers.yml", stale, "Stale update")
+
+    statuses = _statuses(project)
+    assert statuses["solution"].parent == "main"
+    outcomes = updater.update_repo(list(statuses.values()))
+
+    assert [(o.target.branch, o.kind) for o in outcomes] == [
+        ("main", OutcomeKind.UPDATED),
+        ("solution", OutcomeKind.REBASED),
+    ]
+    assert git_out(project, "log", "--format=%s", "main..solution") == "Add solution"
+
+
+def test_resume_continues_a_rebase_resolved_by_hand(
+    project: Path, updater: Updater
+) -> None:
+    git_out(project, "checkout", "-q", "-b", "solution")
+    commit_file(project, "greeting.txt", "hello solution\n", "Add solution")
+    _move_away(project)
+
+    outcomes = updater.update_repo(_ordered(project))
+    assert [o.kind for o in outcomes] == [OutcomeKind.UPDATED, OutcomeKind.CONFLICTS]
+    solution = _statuses(project)["solution"]
+    assert solution.unmerged == ("greeting.txt",)
+    assert solution.checkout is not None
+    assert updater.resume(solution).kind is OutcomeKind.CONFLICTS
+
+    (solution.checkout / "greeting.txt").write_text("hello world solution\n")
+    git.stage_all(solution.checkout)
+    outcome = updater.resume(_statuses(project)["solution"])
+
+    assert outcome.kind is OutcomeKind.REBASED
+    assert not solution.checkout.exists()
+    assert git.show_file_at_ref(project, "solution", "greeting.txt") == (
+        "hello world solution\n"
+    )
