@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-import os
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import copier
@@ -24,7 +22,8 @@ from copierz.models import StatusKind
 from copierz.template_source import ANSWERS_FILE
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
+    from pathlib import Path
 
     from copierz.discovery import Target
     from copierz.models import BranchStatus
@@ -49,16 +48,6 @@ class Outcome:
     kind: OutcomeKind
     detail: str = ""
     checkout: Path | None = None
-
-
-@contextlib.contextmanager
-def _chdir(path: Path) -> Iterator[None]:
-    previous = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(previous)
 
 
 def commit_message(template: Path, ref: str | None) -> str:
@@ -172,7 +161,7 @@ class Updater:
         if not git.is_clean(checkout):
             return Outcome(target, OutcomeKind.SKIPPED, "dirty", checkout)
         try:
-            with _chdir(target.workspace_root):
+            with contextlib.chdir(target.workspace_root):
                 copier.run_update(
                     dst_path=checkout,
                     defaults=True,
