@@ -163,6 +163,8 @@ class Updater:
         """Remove `checkout` if it's a worktree copierz created."""
         if self.owns(checkout):
             git.worktree_remove(target.repo, checkout)
+            with contextlib.suppress(OSError):  # Other worktrees of the repo left.
+                checkout.parent.rmdir()
 
     def _copier_update(self, status: BranchStatus) -> Outcome:
         target = status.target

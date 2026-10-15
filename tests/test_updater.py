@@ -61,6 +61,7 @@ def test_branch_not_checked_out_is_updated_in_a_temporary_worktree(
 
     assert outcome.kind is OutcomeKind.UPDATED
     assert git.worktrees(project) == {"elsewhere": project}
+    assert not any(updater.worktrees_dir.iterdir())
     assert git.show_file_at_ref(project, "main", "greeting.txt") == "hello world\n"
     assert not (project / "greeting.txt").exists()
 
