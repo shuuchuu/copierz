@@ -1,25 +1,53 @@
-"""Run Copier updates and manage the resulting working-tree changes."""
+"""Bring repo branches up to date: `copier update` stack roots, rebase the rest.
+
+Branches that aren't checked out anywhere are updated in a temporary git
+worktree under copierz's cache directory, so your own checkout never
+switches branch and a dirty `main` doesn't block its siblings. A worktree
+is removed once its branch is committed; it stays (and shows up in
+`copierz status`) when an update or rebase stops on conflicts.
+"""
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import copier
 
 from copierz import git
+from copierz.models import StatusKind
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
-    from copierz.config import Config, TrackedRepo
+    from copierz.discovery import Target
+    from copierz.models import BranchStatus
 
 
-class UpdateError(RuntimeError):
-    """A copier update could not be run, or its result could not be committed."""
+class OutcomeKind(Enum):
+    UPDATED = "updated"
+    REBASED = "rebased"
+    UNCOMMITTED = "not committed"
+    CONFLICTS = "conflicts"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+    @property
+    def ok(self) -> bool:
+        return self in {OutcomeKind.UPDATED, OutcomeKind.REBASED}
+
+
+@dataclass
+class Outcome:
+    target: Target
+    kind: OutcomeKind
+    detail: str = ""
+    checkout: Path | None = None
 
 
 @contextlib.contextmanager
@@ -32,79 +60,180 @@ def _chdir(path: Path) -> Iterator[None]:
         os.chdir(previous)
 
 
-def run_update(config: Config, repo: TrackedRepo, branch: str) -> None:
-    """Check out `branch` if needed and run `copier update` on it in place.
+def commit_message(template: Path, ref: str | None) -> str:
+    name = template.name if "template" in template.name else f"{template.name} template"
+    return f"Update {name} to {ref}" if ref else f"Update {name}"
 
-    Requires a clean working tree: copierz never stashes or discards changes
-    on the caller's behalf. Leaves the result (possibly containing conflict
-    markers and unmerged files, exactly as a `git merge` would) uncommitted
-    for review.
 
-    Raises:
-        UpdateError: if the working tree isn't clean, or the template/repo
-            isn't set up as expected.
-    """
-    if not git.is_git_repo(repo.path):
-        msg = f"{repo.path} is not a git repository"
-        raise UpdateError(msg)
+class Updater:
+    """Apply template updates to repo branches, one repo stack at a time."""
 
-    template = config.template_by_name(repo.template)
-    if template is None:
-        msg = f"unknown template {repo.template!r}"
-        raise UpdateError(msg)
+    def __init__(
+        self,
+        cache_dir: Path,
+        commit: bool = True,
+        verify: bool = True,
+        report: Callable[[Outcome], None] | None = None,
+    ) -> None:
+        self.worktrees_dir = cache_dir / "worktrees"
+        self.commit = commit
+        self.verify = verify
+        self.report = report or (lambda _: None)
 
-    current = git.current_branch(repo.path)
-    if current != branch:
-        if not git.is_clean(repo.path):
-            msg = (
-                f"cannot switch {repo.path.name} to {branch!r}: "
-                f"working tree on {current!r} is dirty"
+    def update_repo(self, statuses: list[BranchStatus]) -> list[Outcome]:
+        """Update the given branches of a single repo.
+
+        Stack roots go through `copier update`; every other branch is
+        rebased onto its parent once that parent is up to date. A branch
+        that fails holds back the branches stacked on it.
+
+        Args:
+            statuses: Statuses of branches of one repo, parents first (as
+                returned by `copierz.status.repo_statuses`).
+
+        Returns:
+            One outcome per branch that needed something done.
+        """
+        outcomes = []
+        held_back: set[str] = set()
+        for status in statuses:
+            outcome = self._update_branch(status, held_back)
+            if outcome is None:
+                continue
+            if not outcome.kind.ok:
+                held_back.add(status.target.branch)
+            self.report(outcome)
+            outcomes.append(outcome)
+        return outcomes
+
+    def _update_branch(
+        self, status: BranchStatus, held_back: set[str]
+    ) -> Outcome | None:
+        target, parent = status.target, status.parent
+        if parent is not None and parent in held_back:
+            return Outcome(target, OutcomeKind.SKIPPED, f"waiting for {parent}")
+        if status.kind in {
+            StatusKind.ERROR,
+            StatusKind.BLOCKED,
+            StatusKind.CONFLICTS,
+            StatusKind.IN_PROGRESS,
+        }:
+            return Outcome(
+                target, OutcomeKind.SKIPPED, f"{status.kind.value}: {status.detail}"
             )
-            raise UpdateError(msg)
-        git.checkout(repo.path, branch)
+        if parent is None:
+            if status.kind is StatusKind.UP_TO_DATE:
+                return None
+            return self._copier_update(status)
+        repo = target.repo
+        if git.merge_base(repo, parent, target.branch) == git.rev_parse(repo, parent):
+            if status.kind is StatusKind.UP_TO_DATE:
+                return None
+            return Outcome(
+                target,
+                OutcomeKind.FAILED,
+                f"stacked on {parent} but behind it; update it by hand",
+            )
+        return self._rebase(target, parent)
 
-    if not git.is_clean(repo.path):
-        msg = (
-            f"working tree for {repo.path.name}@{branch} is dirty; "
-            "commit or stash your changes first"
+    def checkout(self, target: Target) -> Path:
+        """Where `target`'s branch is checked out, adding a worktree if nowhere.
+
+        Returns:
+            The path of the main checkout or worktree holding the branch.
+        """
+        existing = git.worktrees(target.repo).get(target.branch)
+        if existing is not None:
+            return existing
+        repo_key = hashlib.sha1(str(target.repo).encode()).hexdigest()[:8]
+        path = (
+            self.worktrees_dir
+            / f"{target.repo.name}-{repo_key}"
+            / target.branch.replace("/", "--")
         )
-        raise UpdateError(msg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        git.worktree_add(target.repo, path, target.branch)
+        return path
 
-    with _chdir(repo.resolved_workspace_root()):
-        copier.run_update(
-            dst_path=repo.path,
-            defaults=True,
-            skip_answered=True,
-            overwrite=True,
-            conflict="inline",
-            quiet=True,
-        )
+    def owns(self, checkout: Path) -> bool:
+        return checkout.is_relative_to(self.worktrees_dir)
 
+    def release(self, target: Target, checkout: Path) -> None:
+        """Remove `checkout` if it's a worktree copierz created."""
+        if self.owns(checkout):
+            git.worktree_remove(target.repo, checkout)
 
-@dataclass
-class ChangedFile:
-    status: str
-    path: str
-    conflicted: bool
+    def _copier_update(self, status: BranchStatus) -> Outcome:
+        target = status.target
+        checkout = self.checkout(target)
+        if not git.is_clean(checkout):
+            return Outcome(target, OutcomeKind.SKIPPED, "dirty", checkout)
+        try:
+            with _chdir(target.workspace_root):
+                copier.run_update(
+                    dst_path=checkout,
+                    defaults=True,
+                    skip_answered=True,
+                    overwrite=True,
+                    conflict="inline",
+                    quiet=True,
+                )
+        except Exception as exc:  # Copier raises many unrelated types
+            git.discard_changes(checkout)
+            self.release(target, checkout)
+            return Outcome(target, OutcomeKind.FAILED, f"copier update: {exc}")
 
+        if unmerged := git.unmerged_files(checkout):
+            return Outcome(
+                target, OutcomeKind.CONFLICTS, f"in {', '.join(unmerged)}", checkout
+            )
+        return self.finish(status, checkout)
 
-def review_changes(repo_path: Path) -> list[ChangedFile]:
-    unmerged = set(git.unmerged_files(repo_path))
-    return [
-        ChangedFile(status=code, path=path, conflicted=path in unmerged)
-        for code, path in git.changed_files(repo_path)
-    ]
+    def finish(self, status: BranchStatus, checkout: Path) -> Outcome:
+        """Commit an applied (conflict-free) update, then drop its worktree.
 
+        Returns:
+            UPDATED, or UNCOMMITTED if committing is disabled or failed (e.g.
+            on a pre-commit hook).
+        """
+        target = status.target
+        versions = f"{status.current_ref} → {status.latest_ref}"
+        if not self.commit:
+            return Outcome(target, OutcomeKind.UNCOMMITTED, versions, checkout)
+        git.stage_all(checkout)
+        try:
+            git.commit(
+                checkout,
+                commit_message(target.template, status.latest_ref),
+                verify=self.verify,
+            )
+        except git.GitError as exc:
+            return Outcome(
+                target, OutcomeKind.UNCOMMITTED, f"commit failed: {exc}", checkout
+            )
+        self.release(target, checkout)
+        return Outcome(target, OutcomeKind.UPDATED, versions)
 
-def commit_update(repo_path: Path, template_name: str, ref: str | None) -> None:
-    if git.unmerged_files(repo_path):
-        msg = "cannot commit: unresolved conflicts remain"
-        raise UpdateError(msg)
-    if git.is_clean(repo_path):
-        msg = "nothing to commit"
-        raise UpdateError(msg)
-    git.stage_all(repo_path)
-    message = f"Update {template_name} template"
-    if ref:
-        message += f" to {ref}"
-    git.commit(repo_path, message)
+    def _rebase(self, target: Target, parent: str) -> Outcome:
+        checkout = self.checkout(target)
+        if not git.is_clean(checkout):
+            return Outcome(target, OutcomeKind.SKIPPED, "dirty", checkout)
+        if git.rebase(checkout, parent):
+            self.release(target, checkout)
+            return Outcome(target, OutcomeKind.REBASED, f"onto {parent}")
+        if git.is_rebasing(checkout):
+            return Outcome(
+                target, OutcomeKind.CONFLICTS, f"rebasing onto {parent}", checkout
+            )
+        return Outcome(target, OutcomeKind.FAILED, f"rebase onto {parent} failed")
+
+    def abort(self, status: BranchStatus) -> None:
+        """Throw away a stopped update or rebase, back to the branch's last commit."""
+        checkout = status.checkout
+        if checkout is None:
+            return
+        if git.is_rebasing(checkout):
+            git.rebase_abort(checkout)
+        elif not self.owns(checkout):
+            git.discard_changes(checkout)
+        self.release(status.target, checkout)

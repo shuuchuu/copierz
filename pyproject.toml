@@ -6,10 +6,9 @@ dependencies = [
   "copier >= 9.9, < 10",
   "packaging >= 24",
   "pyyaml >= 6, < 7",
-  "textual >= 8, < 9",
-  "tomli-w >= 1.2, < 2",
+  "rich >= 13",
 ]
-description = "TUI to track and manage Copier updates across a fleet of git repositories."
+description = "CLI to track and apply Copier updates across a fleet of git repositories."
 homepage = "https://github.com/shuuchuu/copierz"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -26,13 +25,9 @@ dev = [
   "bumpver >= 2025.1131",
   "doit >= 0.37",
   "pytest >= 8",
-  "pytest-asyncio >= 1, < 2",
   "ruff >= 0.11",
   "ty >= 0.0.33",
 ]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
 
 [tool.ruff]
 target-version = "py312"

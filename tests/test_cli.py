@@ -2,55 +2,54 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from copierz import git
-from copierz.cli import build_parser
-from copierz.config import Config, TemplateSource, TrackedRepo, save_config
+import pytest
+
+from copierz.cli import UsageError, build_parser
+from tests.conftest import git_out
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import pytest
+
+def _run(*argv: str) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
 
 
-def test_status_with_no_config_reports_nothing_tracked(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_status_lists_branches_and_suggests_next_step(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    parser = build_parser()
-    args = parser.parse_args(["--config", str(tmp_path / "missing.toml"), "status"])
+    config = tmp_path / "config.toml"
+    config.write_text(f'roots = ["{tmp_path}"]\n')
 
-    assert args.func(args) == 0
-    assert "No repos tracked" in capsys.readouterr().out
+    assert _run("--config", str(config)) == 0
 
-
-def test_status_prints_tracked_repo(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    template_repo: Path,
-    subproject_repo: Path,
-) -> None:
-    branch = git.current_branch(subproject_repo)
-    config_path = tmp_path / "config.toml"
-    save_config(
-        Config(
-            templates=[TemplateSource(name="tmpl", path=template_repo)],
-            repos=[
-                TrackedRepo(path=subproject_repo, template="tmpl", branches=[branch])
-            ],
-        ),
-        config_path,
-    )
-    parser = build_parser()
-    args = parser.parse_args(["--config", str(config_path), "status"])
-
-    assert args.func(args) == 0
     out = capsys.readouterr().out
-    assert subproject_repo.name in out
-    assert "update available" in out
+    assert "project" in out
+    assert "0.1.0 → 0.2.0" in out
+    assert "copierz update --all" in out
 
 
-def test_default_command_is_tui() -> None:
-    parser = build_parser()
-    args = parser.parse_args([])
-    from copierz.cli import _cmd_tui
+def test_update_all_then_everything_is_up_to_date(
+    project: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    git_out(project, "branch", "other")
 
-    assert args.func is _cmd_tui
+    assert _run("--root", str(tmp_path), "update", "--all") == 0
+    assert _run("--root", str(tmp_path), "status") == 0
+
+    assert "Everything is up to date." in capsys.readouterr().out
+
+
+def test_unknown_selector_is_a_usage_error(project: Path, tmp_path: Path) -> None:
+    with pytest.raises(UsageError, match="nope"):
+        _run("--root", str(tmp_path), "update", "nope")
+
+
+def test_no_roots_is_a_usage_error(tmp_path: Path) -> None:
+    with pytest.raises(UsageError, match="roots"):
+        _run("--config", str(tmp_path / "missing.toml"), "status")

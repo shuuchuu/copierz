@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 ANSWERS_FILE = ".copier-answers.yml"
 
 
-@dataclass
+@dataclass(frozen=True)
 class Answers:
     src_path: str
     commit: str | None

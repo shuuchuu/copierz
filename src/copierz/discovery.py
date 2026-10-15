@@ -1,147 +1,108 @@
-"""Scan a directory tree for git repos with Copier answers, and track them."""
+"""Find every branch of every git repo under the roots that carries Copier answers."""
 
 from __future__ import annotations
 
-from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from copierz import git
-from copierz.config import TemplateSource, TrackedRepo
 from copierz.template_source import read_answers
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
     from copierz.config import Config
     from copierz.template_source import Answers
 
 SKIP_DIR_NAMES = {"node_modules"}
 
 
-@dataclass
-class DiscoveredBranch:
+@dataclass(frozen=True)
+class Target:
+    """One branch of one repo generated from a Copier template."""
+
+    repo: Path
     branch: str
     answers: Answers
 
+    @property
+    def label(self) -> str:
+        return f"{self.repo.name}@{self.branch}"
 
-@dataclass
-class DiscoveredRepo:
-    path: Path
-    branches: list[DiscoveredBranch]
+    @property
+    def workspace_root(self) -> Path:
+        """Directory to run Copier from so that a relative `_src_path` resolves.
+
+        Copier resolves a relative `_src_path` against the current working
+        directory at update time, so it must match wherever `copier copy`
+        was originally run from. That's virtually always the repo's own
+        parent directory (you `cd` there, then `copier copy <src> <name>`).
+
+        Returns:
+            The repo's parent directory.
+        """
+        return self.repo.parent
+
+    @property
+    def template(self) -> Path:
+        src_path = Path(self.answers.src_path).expanduser()
+        if not src_path.is_absolute():
+            src_path = self.workspace_root / src_path
+        return src_path.resolve()
 
 
-def find_repos(root: Path) -> list[DiscoveredRepo]:
-    """Find git repos under `root` with at least one branch carrying Copier answers.
+def discover(config: Config, roots: Iterable[Path] | None = None) -> list[Target]:
+    """Scan the roots for repos, and every local branch for an answers file.
 
-    Every local branch of every repo found is checked (via `git show`, no
-    checkout needed), not just the currently checked-out one.
+    Branches are read with `git show`, so no checkout is needed. Scanning
+    stops descending at a repo (a vendored repo nested inside a tracked one
+    is left alone), and skips hidden directories and linked worktrees.
 
     Returns:
-        One entry per repo that has at least one such branch.
+        One target per non-excluded repo branch carrying Copier answers,
+        sorted by repo path then branch name.
     """
-    discovered = []
-    for repo_path in _iter_git_repo_roots(root):
-        branches = [
-            DiscoveredBranch(branch=branch, answers=answers)
-            for branch in git.list_local_branches(repo_path)
-            if (answers := read_answers(repo_path, branch)) is not None
-        ]
-        if branches:
-            discovered.append(DiscoveredRepo(path=repo_path, branches=branches))
-    return discovered
+    targets = []
+    seen: set[Path] = set()
+    for root in roots if roots is not None else config.roots:
+        for repo in _iter_repo_roots(root.expanduser().resolve()):
+            if repo in seen:
+                continue
+            seen.add(repo)
+            for branch in git.list_local_branches(repo):
+                if config.is_excluded(repo, branch):
+                    continue
+                answers = read_answers(repo, branch)
+                if answers is not None:
+                    targets.append(Target(repo, branch, answers))
+    return sorted(targets, key=lambda t: (str(t.repo), t.branch))
 
 
-def _iter_git_repo_roots(path: Path) -> list[Path]:
+def refresh(targets: Iterable[Target]) -> list[Target]:
+    """Re-read targets' answers, which a commit or rebase may have changed.
+
+    Returns:
+        The targets whose branch still carries an answers file.
+    """
+    return [
+        Target(target.repo, target.branch, answers)
+        for target in targets
+        if (answers := read_answers(target.repo, target.branch)) is not None
+    ]
+
+
+def _iter_repo_roots(path: Path) -> Iterator[Path]:
     if not path.is_dir():
-        return []
-    if git.is_git_repo(path):
-        return [path]
-    found = []
+        return
+    if (path / ".git").exists():
+        if git.is_repo_root(path):
+            yield path
+        return
     for child in sorted(path.iterdir()):
         if (
             child.is_dir()
             and not child.name.startswith(".")
             and child.name not in SKIP_DIR_NAMES
         ):
-            found.extend(_iter_git_repo_roots(child))
-    return found
-
-
-def resolve_template_path(answers: Answers, base_dir: Path) -> Path:
-    """Resolve `answers.src_path`, which Copier may have recorded as relative.
-
-    A relative `_src_path` is relative to wherever `copier copy` was
-    originally run from, which is virtually always the repo's own parent
-    directory (see `TrackedRepo.resolved_workspace_root`) — pass that as
-    `base_dir`.
-
-    Returns:
-        The absolute, resolved path to the template.
-    """
-    src_path = Path(answers.src_path).expanduser()
-    if not src_path.is_absolute():
-        src_path = base_dir / src_path
-    return src_path.resolve()
-
-
-@dataclass
-class ScanSummary:
-    repos_found: int = 0
-    branches_found: int = 0
-    templates_added: int = 0
-    branches_added: int = 0
-    warnings: list[str] = field(default_factory=list)
-
-
-def scan_and_track(config: Config, root: Path) -> ScanSummary:
-    """Discover repos under `root` and add any new templates/repos/branches.
-
-    Already-tracked repos/branches are left alone: this only adds what's
-    missing, so re-running a scan is safe.
-
-    Returns:
-        A summary of what was found and added.
-    """
-    root = root.expanduser().resolve()
-    discovered = find_repos(root)
-    summary = ScanSummary(
-        repos_found=len(discovered),
-        branches_found=sum(len(r.branches) for r in discovered),
-    )
-
-    for repo in discovered:
-        base_dir = repo.path.parent
-        template_paths = Counter(
-            resolve_template_path(b.answers, base_dir) for b in repo.branches
-        )
-        chosen_path, _ = template_paths.most_common(1)[0]
-        if len(template_paths) > 1:
-            summary.warnings.append(
-                f"{repo.path.name}: branches reference different templates; "
-                f"using {chosen_path}"
-            )
-
-        template = next((t for t in config.templates if t.path == chosen_path), None)
-        if template is None:
-            template = TemplateSource(name=chosen_path.name, path=chosen_path)
-            config.templates.append(template)
-            summary.templates_added += 1
-
-        tracked = config.repo_by_path(repo.path)
-        if tracked is None:
-            tracked = TrackedRepo(path=repo.path, template=template.name, branches=[])
-            config.repos.append(tracked)
-
-        for branch in repo.branches:
-            branch_template_path = resolve_template_path(branch.answers, base_dir)
-            if branch_template_path != chosen_path:
-                summary.warnings.append(
-                    f"{repo.path.name}@{branch.branch}: skipped, "
-                    f"uses a different template ({branch_template_path})"
-                )
-                continue
-            if branch.branch not in tracked.branches:
-                tracked.branches.append(branch.branch)
-                summary.branches_added += 1
-
-    return summary
+            yield from _iter_repo_roots(child)

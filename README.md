@@ -1,9 +1,8 @@
 # `copierz`
 
-A TUI to track a fleet of git repos generated from a
-[Copier](https://copier.readthedocs.io/) template, see which repos/branches
-are behind the template, and drive `copier update` and conflict resolution
-from one place.
+A CLI to track the git repos — and every branch of them — generated from
+[Copier](https://copier.readthedocs.io/) templates, see which are behind
+their template, and bring them up to date in one go.
 
 ## Configuring
 
@@ -11,86 +10,83 @@ copierz reads `~/.config/copierz/config.toml` (or `$XDG_CONFIG_HOME`, or
 `--config PATH`):
 
 ```toml
-[[templates]]
-name = "template"
-path = "/home/mog/repos/shuuchuu/template"
+# Scanned recursively on every run.
+roots = ["~/repos"]
 
-[[repos]]
-path = "/home/mog/repos/shuuchuu/caesar-cipher"
-template = "template"
-branches = ["main", "solution"]
-# workspace_root defaults to the repo's own parent directory (here,
-# /home/mog/repos/shuuchuu) — the directory Copier's relative `_src_path` is
-# resolved against, which is virtually always wherever `copier copy` was run
-# from, i.e. the repo's own parent. Set it explicitly only if a repo's
-# template was copied from somewhere else.
+# Repos (`path`) or single branches (`path@branch`) to leave alone.
+exclude = ["~/repos/shuuchuu/old-thing"]
 ```
 
-You normally don't write this by hand: press `a` in the TUI and give it a
-root directory (e.g. `/home/mog/repos`). copierz recursively scans under
-that root for git repos, checks *every local branch* of each one (via `git
-show branch:.copier-answers.yml`, no checkout needed) for a Copier answers
-file, and adds any repo/branch it finds — creating a `[[templates]]` entry
-from each answers file's `_src_path` the first time it's seen (resolving a
-relative `_src_path` against *that repo's own parent directory*, not the
-scanned root — so it works even when scanning from several levels above,
-or across repos that recorded their template path relative to different
-directories). It stops descending once it finds a `.git` directory (so a
-vendored repo nested inside a tracked one is left alone) and skips hidden
-directories. Scanning again is safe — it only adds what's missing, never
-removes anything.
+There's no list of repos to maintain: on every run copierz scans the roots
+for git repos, and every local branch of each (via `git show
+branch:.copier-answers.yml`, no checkout needed) for a Copier answers file.
+It stops descending at a repo, and skips hidden directories and linked
+worktrees. The template comes from each answers file's `_src_path`; a
+relative one is resolved against the repo's own parent directory, which is
+where `copier copy` is virtually always run from.
 
-Stop tracking a repo/branch with `x`, or by editing the file directly.
+`--root PATH` (repeatable) scans other directories instead of the
+configured roots.
 
-## Running
+## Usage
 
 ```console
-$ copierz            # launch the TUI
-$ copierz status      # print statuses and exit (for scripts/cron)
-$ copierz status --fetch
+$ copierz                    # same as `copierz status`
+$ copierz status --fetch     # git fetch every repo first
+$ copierz update --all       # update everything that's behind
+$ copierz update ghcli       # one repo (or REPO@BRANCH, a path, `.` for cwd)
+$ copierz resolve            # finish whatever stopped on conflicts
+$ copierz abort ghcli@main   # throw away a stopped update or rebase
+$ copierz log                # template changes since the oldest version in use
 ```
 
-## TUI keybindings
+`copierz update` commits every update that applies cleanly (`--no-commit`
+to review them first, `--no-verify` to skip pre-commit hooks). Anything
+that stops on conflicts is left for `copierz resolve`, which walks each one
+through your `git mergetool`, then offers to review the result in your
+`git difftool` and commit it.
 
-| Key     | Action                                           |
-| ------- | ------------------------------------------------ |
-| `r`     | Refresh statuses                                 |
-| `f`     | `git fetch` every tracked repo, then refresh      |
-| `u`     | Run `copier update` on the selected branch        |
-| `enter` | Open the review/resolve screen for the selection |
-| `a`     | Scan a root directory for repos/branches to track |
-| `x`     | Stop tracking the selected repo/branch            |
-| `q`     | Quit                                              |
+## Stacked branches
 
-In the review screen (opened automatically after an update, or via `enter`):
+Branches are often stacked: `solution` on `main`, `main-en` as a
+translation commit on top of `main`, and so on, kept up to date by
+rebasing. copierz detects this from the history: a branch is stacked on
+another if it has commits of its own past their merge base, while the other
+has none except template updates (commits touching the answers file). The
+closest such branch is the parent; `copierz status` shows the stacks as a
+tree.
 
-| Key      | Action                                             |
-| -------- | --------------------------------------------------- |
-| `e`      | Open the selected file in `$EDITOR`                  |
-| `s`      | Stage the selected file (`git add`, i.e. mark resolved) |
-| `d`      | View the file's diff in `$PAGER`                     |
-| `c`      | Stage everything and commit                          |
-| `escape` | Back to the repo list                                |
+`copierz update` then only runs `copier update` on the bottom branch of each
+stack, and rebases the branches above onto their parent once it's done.
+Selecting any branch of a stack updates the whole stack. A branch that
+stops on conflicts holds back the branches stacked on it, until `copierz
+resolve` finishes it and rebases them. Rebasing rewrites those branches, so
+pushing them afterwards needs `--force-with-lease`.
 
-## How statuses are computed
+## Worktrees
 
-For each tracked branch, copierz reads `.copier-answers.yml` as committed on
-that branch (`git show branch:.copier-answers.yml`, no checkout needed) and
-compares its `_commit` against the template's latest git tag (or `HEAD` if it
-has none) — the same resolution Copier itself uses. If that branch happens to
-be the one currently checked out, its working tree is also inspected for
-uncommitted changes or unresolved conflicts from a prior update.
+copierz never switches your checkout to another branch, stashes, or
+discards your changes. A branch checked out somewhere (your main checkout or
+any worktree) is updated there, and only if it's clean. Any other branch is
+updated in a temporary worktree under `~/.cache/copierz/worktrees/`, so a
+dirty `main` doesn't hold back its siblings. That worktree is removed once
+its branch is committed, and stays (its path is shown) while it has
+conflicts to resolve.
 
-Statuses: `up to date`, `update available`, `dirty` (working tree has
-uncommitted changes), `conflicts` (an update left unmerged files), `not
-tracked` (no answers file on that branch), `error`.
+## Statuses
 
-## Updating
+- `up to date`: the branch's answers file records the template's latest
+  version (highest PEP 440 git tag, else `HEAD`, as Copier itself does).
+- `behind`: an update is available; for a stacked branch, it'll come from
+  rebasing onto its parent.
+- `behind, dirty`: the branch is checked out with uncommitted changes, so
+  it can't be updated until you commit or stash them.
+- `conflicts`: an update or rebase stopped on conflicts; run `copierz
+  resolve`.
+- `to commit`: an update was applied (or its conflicts resolved) but not
+  committed yet; run `copierz resolve`.
+- `error`: the template can't be found or read.
 
-`copierz` never stashes, discards, or force-switches branches on your
-behalf — it requires a clean working tree, checks out the target branch if
-needed, and then runs `copier update` in place. Conflicts come out exactly as
-a `git merge` conflict would (Copier runs a real 3-way `git merge-file`
-under the hood): conflict markers in the file, and the file listed as
-unmerged by `git status`. Resolve them with your usual git workflow, or via
-the review screen's `$EDITOR`/stage/commit actions.
+Conflicts come out exactly as a `git merge` conflict would (Copier runs a
+real 3-way `git merge-file` under the hood): conflict markers in the file,
+and the file listed as unmerged by `git status`.

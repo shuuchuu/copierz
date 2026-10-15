@@ -1,83 +1,34 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
-from copierz.config import (
-    Config,
-    TemplateSource,
-    TrackedRepo,
-    load_config,
-    save_config,
-)
+import pytest
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from copierz.config import Config, ConfigError, load_config
 
 
-def test_load_config_missing_file_returns_empty(tmp_path: Path) -> None:
-    config = load_config(tmp_path / "nope" / "config.toml")
-    assert config.templates == []
-    assert config.repos == []
+def test_missing_file_gives_empty_config(tmp_path: Path) -> None:
+    assert load_config(tmp_path / "missing.toml") == Config()
 
 
-def test_save_and_load_round_trip(tmp_path: Path) -> None:
+def test_roots_and_exclude_are_expanded(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    config = Config(
-        templates=[TemplateSource(name="tmpl", path=tmp_path / "template")],
-        repos=[
-            TrackedRepo(
-                path=tmp_path / "project", template="tmpl", branches=["main", "dev"]
-            )
-        ],
+    config_path.write_text(
+        f'roots = ["~/repos", "{tmp_path}/a/../b"]\n'
+        f'exclude = ["~/repos/x", "{tmp_path}/y@main"]\n'
     )
-    save_config(config, config_path)
 
-    loaded = load_config(config_path)
-    assert loaded.templates == config.templates
-    assert loaded.repos == config.repos
+    config = load_config(config_path)
 
-
-def test_workspace_root_defaults_to_repo_parent(tmp_path: Path) -> None:
-    repo = TrackedRepo(path=tmp_path / "projects" / "proj", template="tmpl")
-    assert repo.resolved_workspace_root() == tmp_path / "projects"
+    assert config.roots == [Path.home() / "repos", tmp_path / "b"]
+    assert config.is_excluded(Path.home() / "repos" / "x", "any")
+    assert config.is_excluded(tmp_path / "y", "main")
+    assert not config.is_excluded(tmp_path / "y", "other")
 
 
-def test_workspace_root_can_be_overridden(tmp_path: Path) -> None:
-    repo = TrackedRepo(
-        path=tmp_path / "projects" / "proj",
-        template="tmpl",
-        workspace_root=tmp_path,
-    )
-    assert repo.resolved_workspace_root() == tmp_path
-
-
-def test_save_and_load_round_trip_with_workspace_root_override(
-    tmp_path: Path,
-) -> None:
+def test_old_format_is_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
-    config = Config(
-        templates=[TemplateSource(name="tmpl", path=tmp_path / "template")],
-        repos=[
-            TrackedRepo(
-                path=tmp_path / "project",
-                template="tmpl",
-                branches=["main"],
-                workspace_root=tmp_path / "elsewhere",
-            )
-        ],
-    )
-    save_config(config, config_path)
+    config_path.write_text('[[repos]]\npath = "/x"\ntemplate = "t"\n')
 
-    loaded = load_config(config_path)
-    assert loaded.repos == config.repos
-
-
-def test_template_by_name_and_repo_by_path(tmp_path: Path) -> None:
-    template = TemplateSource(name="tmpl", path=tmp_path / "template")
-    repo = TrackedRepo(path=tmp_path / "project", template="tmpl", branches=["main"])
-    config = Config(templates=[template], repos=[repo])
-
-    assert config.template_by_name("tmpl") is template
-    assert config.template_by_name("missing") is None
-    assert config.repo_by_path(tmp_path / "project") is repo
-    assert config.repo_by_path(tmp_path / "missing") is None
+    with pytest.raises(ConfigError, match="roots"):
+        load_config(config_path)
