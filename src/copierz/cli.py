@@ -1,4 +1,4 @@
-"""Command-line interface: status, update, resolve, continue, abort, log."""
+"""Command-line interface: status, update, resolve, continue, abort, push, log."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from copierz import git
 from copierz.config import ConfigError, default_cache_dir, load_config
 from copierz.discovery import discover, refresh
 from copierz.models import StatusKind
+from copierz.pusher import PushPlan, PushState, plan, push
 from copierz.stacks import depth
 from copierz.status import LatestRefs, compute_statuses, repo_statuses
 from copierz.updater import Outcome, OutcomeKind, Updater
@@ -85,15 +86,20 @@ def _matches(selector: str, target: Target) -> bool:
     )
 
 
+def _select_targets(targets: list[Target], selectors: Iterable[str]) -> list[Target]:
+    selectors = list(selectors)
+    for selector in selectors:
+        if not any(_matches(selector, t) for t in targets):
+            msg = f"{selector!r} matches no Copier-generated repo branch"
+            raise UsageError(msg)
+    return [t for t in targets if any(_matches(sel, t) for sel in selectors)]
+
+
 def _select(
     statuses: list[BranchStatus], selectors: Iterable[str]
 ) -> list[BranchStatus]:
-    selectors = list(selectors)
-    for selector in selectors:
-        if not any(_matches(selector, s.target) for s in statuses):
-            msg = f"{selector!r} matches no Copier-generated repo branch"
-            raise UsageError(msg)
-    return [s for s in statuses if any(_matches(sel, s.target) for sel in selectors)]
+    selected = set(map(id, _select_targets([s.target for s in statuses], selectors)))
+    return [s for s in statuses if id(s.target) in selected]
 
 
 def _whole_stacks(
@@ -438,6 +444,87 @@ def _cmd_abort(args: argparse.Namespace) -> int:
     return 0
 
 
+PUSH_STYLE = {
+    PushState.UP_TO_DATE: "green",
+    PushState.AHEAD: "yellow",
+    PushState.REWRITTEN: "yellow",
+    PushState.BEHIND: "red",
+    PushState.DIVERGED: "bold red",
+    PushState.NO_UPSTREAM: "dim",
+}
+
+
+def _push_one(push_plan: PushPlan, args: argparse.Namespace) -> tuple[str, bool]:
+    """Push one branch unless it's a dry run.
+
+    Returns:
+        What happened, and whether it's a problem to report through the exit
+        code.
+    """
+    state = push_plan.state
+    if state in {PushState.BEHIND, PushState.DIVERGED}:
+        return push_plan.detail, True
+    if state is PushState.REWRITTEN and not args.force:
+        return f"{push_plan.detail} (pass --force)", True
+    if state not in {PushState.AHEAD, PushState.REWRITTEN}:
+        return push_plan.detail, False
+    if args.dry_run:
+        return f"would push: {push_plan.detail}", False
+    try:
+        push(push_plan, force=args.force)
+    except git.GitError as exc:
+        return f"push failed: {exc}", True
+    how = " with --force-with-lease" if state is PushState.REWRITTEN else ""
+    return f"pushed {push_plan.commits} commit(s) to {push_plan.tracking}{how}", False
+
+
+def _cmd_push(args: argparse.Namespace) -> int:
+    targets = _load_targets(args)
+    if not args.all:
+        targets = _select_targets(targets, args.selectors or ["."])
+    if not args.no_fetch:
+        remotes = {
+            (t.repo, tracked[0])
+            for t in targets
+            if (tracked := git.upstream(t.repo, t.branch)) is not None
+        }
+        for repo, remote in sorted(remotes):
+            git.fetch(repo, remote)
+    results = []
+    problems = False
+    for target in targets:
+        push_plan = plan(target)
+        detail, problem = _push_one(push_plan, args)
+        problems |= problem
+        results.append((push_plan, detail))
+    if args.json:
+        _emit(
+            {
+                "branches": [
+                    {
+                        "repo": str(p.target.repo),
+                        "branch": p.target.branch,
+                        "state": p.state.name.lower(),
+                        "remote": p.tracking or None,
+                        "commits": p.commits,
+                        "detail": detail,
+                    }
+                    for p, detail in results
+                ]
+            }
+        )
+        return 1 if problems else 0
+    shown = [(p, d) for p, d in results if p.state is not PushState.UP_TO_DATE]
+    for push_plan, detail in shown:
+        line = Text(f"{push_plan.target.label}  ", style="bold")
+        line.append(push_plan.state.value, style=PUSH_STYLE[push_plan.state])
+        line.append(f"  {detail}")
+        console.print(line)
+    up_to_date = len(results) - len(shown)
+    console.print(Text(f"{up_to_date} branch(es) already up to date.", style="dim"))
+    return 1 if problems else 0
+
+
 def _version_key(ref: str) -> tuple[int, Version | str]:
     try:
         return (0, Version(ref))
@@ -588,6 +675,38 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true", help="don't ask before discarding changes"
     )
     abort.set_defaults(func=_cmd_abort)
+
+    push_ = subparsers.add_parser(
+        "push",
+        parents=[machine],
+        help="push branches to the remote branches they track",
+        description=(
+            "Fetch, then push each selected branch that is ahead of the remote "
+            "branch it tracks. A branch rebased by `update` needs --force: it's "
+            "then pushed with --force-with-lease, and only if the remote holds "
+            "nothing the branch didn't have (its tip is in the branch's reflog). "
+            "Branches behind or diverged from their remote are never pushed."
+        ),
+    )
+    push_.add_argument(
+        "selectors",
+        nargs="*",
+        metavar="SELECTOR",
+        help=f"{selector_help}; default: `.`",
+    )
+    push_.add_argument("--all", action="store_true", help="push every repo")
+    push_.add_argument(
+        "--force",
+        action="store_true",
+        help="force-push (with a lease) the branches rebased by `update`",
+    )
+    push_.add_argument(
+        "--dry-run", action="store_true", help="only show what would be pushed"
+    )
+    push_.add_argument(
+        "--no-fetch", action="store_true", help="use the last fetched remote state"
+    )
+    push_.set_defaults(func=_cmd_push)
 
     log = subparsers.add_parser(
         "log",

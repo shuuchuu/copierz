@@ -231,8 +231,52 @@ def discard_changes(checkout: Path) -> None:
     _run(checkout, "clean", "-fd", "--quiet")
 
 
-def fetch(repo: Path) -> None:
-    _run(repo, "fetch", "--all", "--tags", check=False)
+def fetch(repo: Path, remote: str | None = None) -> None:
+    args = [remote] if remote else ["--all", "--tags"]
+    _run(repo, "fetch", "--quiet", *args, check=False)
+
+
+def upstream(repo: Path, branch: str) -> tuple[str, str] | None:
+    """The remote and remote branch that `branch` tracks.
+
+    Returns:
+        `(remote, branch on the remote)`, or `None` if it tracks nothing.
+    """
+    remote = _run(repo, "config", f"branch.{branch}.remote", check=False).stdout
+    merge = _run(repo, "config", f"branch.{branch}.merge", check=False).stdout
+    if not remote.strip() or not merge.strip() or remote.strip() == ".":
+        return None
+    return remote.strip(), merge.strip().removeprefix("refs/heads/")
+
+
+def resolve(repo: Path, ref: str) -> str | None:
+    result = _run(repo, "rev-parse", "-q", "--verify", f"{ref}^{{commit}}", check=False)
+    return result.stdout.strip() or None
+
+
+def reflog(repo: Path, branch: str) -> set[str]:
+    """Every commit `branch` has pointed to, as far as its reflog goes.
+
+    Returns:
+        The commits' shas.
+    """
+    result = _run(
+        repo, "reflog", "show", "--format=%H", f"refs/heads/{branch}", check=False
+    )
+    return set(_lines(result.stdout))
+
+
+def push(
+    repo: Path, remote: str, branch: str, remote_branch: str, lease: str | None = None
+) -> None:
+    """Push `branch` to `remote_branch`.
+
+    With `lease`, force the push, but only over that commit.
+    """
+    args = ["push", "--quiet"]
+    if lease is not None:
+        args.append(f"--force-with-lease=refs/heads/{remote_branch}:{lease}")
+    _run(repo, *args, remote, f"refs/heads/{branch}:refs/heads/{remote_branch}")
 
 
 def stage_all(checkout: Path) -> None:

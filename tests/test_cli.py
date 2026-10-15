@@ -99,3 +99,23 @@ def test_json_output_for_agents(
     _run(*root, "log", "--json")
     (template,) = json.loads(capsys.readouterr().out)["templates"]
     assert template["in_use"] == {"0.2.0": ["project@main"]}
+
+
+def test_push_dry_run_then_force(
+    project: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bare = tmp_path / "remote.git"
+    git_out(tmp_path, "clone", "-q", "--bare", str(project), str(bare))
+    git_out(project, "remote", "add", "origin", str(bare))
+    git_out(project, "fetch", "-q", "origin")
+    git_out(project, "branch", "-q", "--set-upstream-to=origin/main", "main")
+    git_out(project, "commit", "-q", "--amend", "-m", "Reworded")
+    root = ["--root", str(project)]
+
+    assert _run(*root, "push", "--all", "--dry-run") == 1
+    assert "pass --force" in " ".join(capsys.readouterr().out.split())
+
+    assert _run(*root, "push", "--all", "--force", "--json") == 0
+    (branch,) = json.loads(capsys.readouterr().out)["branches"]
+    assert (branch["state"], branch["remote"]) == ("rewritten", "origin/main")
+    assert git_out(bare, "log", "-1", "--format=%s") == "Reworded"

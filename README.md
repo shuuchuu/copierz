@@ -38,6 +38,7 @@ $ copierz update ghcli       # one repo (or REPO@BRANCH, a path, `.` for cwd)
 $ copierz resolve            # finish whatever stopped on conflicts
 $ copierz continue           # same, non-interactively, once fixed by hand
 $ copierz abort ghcli@main   # throw away a stopped update or rebase
+$ copierz push --all --force # push what changed, rebased branches included
 $ copierz log                # template changes since the oldest version in use
 ```
 
@@ -47,9 +48,19 @@ that stops on conflicts is left for `copierz resolve`, which walks each one
 through your `git mergetool`, then offers to review the result in your
 `git difftool` and commit it.
 
+## Pushing
+
+`copierz push` fetches, then pushes every selected branch that is ahead of
+the remote branch it tracks. Branches rebased by `update` need `--force`;
+they're then pushed with `--force-with-lease` on the fetched remote tip, and
+only if that tip is in the branch's reflog — i.e. the remote holds nothing
+the branch didn't have, so the force can't drop anyone else's work. Branches
+behind or diverged from their remote are never pushed, and `--dry-run` shows
+what would happen.
+
 ## Scripting and agents
 
-`status`, `update`, `continue`, `abort` and `log` take `--json` to print a
+`status`, `update`, `continue`, `abort`, `push` and `log` take `--json` to print a
 single JSON document on stdout (errors go to stderr, exit code 2):
 
 - `status --json`: `{"branches": [{repo, branch, template, status,
@@ -61,6 +72,10 @@ single JSON document on stdout (errors go to stderr, exit code 2):
   `rebased`, `uncommitted`, `conflicts`, `skipped`, `failed`. The exit code
   is 1 if anything stopped (conflicts, uncommitted, failed).
 - `abort --json --yes`: `{"aborted": [...]}`, same fields as `status`.
+- `push --json`: `{"branches": [{repo, branch, state, remote, commits,
+  detail}]}`, with `state` one of `up_to_date`, `ahead`, `rewritten`,
+  `behind`, `diverged`, `no_upstream`. The exit code is 1 if a branch
+  couldn't be pushed.
 - `log --json`: `{"templates": [{template, oldest, latest, commits: [{sha,
   subject, refs}], in_use: {version: ["repo@branch", ...]}}]}`.
 
@@ -86,8 +101,8 @@ resolve` (or `continue`) finishes it and rebases them. During these rebases
 the answers file follows the parent: a conflict there only comes from a
 stale template update made on the branch itself, so it's resolved with the
 parent's version, and a commit left empty by that is dropped. Rebasing
-rewrites those branches, so pushing them afterwards needs
-`--force-with-lease`.
+rewrites those branches, so pushing them afterwards needs a force: see
+`copierz push --force` below.
 
 ## Worktrees
 
