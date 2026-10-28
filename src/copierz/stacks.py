@@ -54,23 +54,16 @@ def _is_stacked_on(
     return None
 
 
-# Reflog actions that move a branch to an existing commit, without making one.
-_FOLLOWING_ACTIONS = (
-    "branch: Created from",
-    "branch: Reset to",
-    "reset: moving to",
-    "rebase (finish)",
-)
-
-
 def _copies(repo: Path, branches: list[str]) -> set[tuple[str, str]]:
     """Find the branches that are copies of another branch's past tip.
 
-    `copy` is a copy of `branch` when `copy` only followed it to its tip
-    (created, reset or rebased there), while `branch` got there on its own
-    (by committing, rebasing, ...) rather than by being created from it.
-    That's a backup of `branch`, or a branch made from it with no commits
-    yet: `branch` isn't stacked on it, whatever the history says.
+    `copy` is a copy of `branch` when `branch` was at `copy`'s tip before
+    `copy` got there: `copy` followed `branch`, as a backup of it, or a
+    branch made from it with no commits yet. `branch` isn't stacked on it,
+    whatever the history says. A branch stacked on a parent is the other
+    way round: it's created, reset or rebased onto the parent's tip after
+    the parent got there. When both got there within the same second (a
+    script moving them together), it's not a copy.
 
     Returns:
         `(copy, branch)` pairs.
@@ -78,17 +71,12 @@ def _copies(repo: Path, branches: list[str]) -> set[tuple[str, str]]:
     entries = {branch: git.reflog_entries(repo, branch) for branch in branches}
     copies = set()
     for copy, copy_entries in entries.items():
-        if not copy_entries or not copy_entries[0][1].startswith(_FOLLOWING_ACTIONS):
+        if not copy_entries:
             continue
-        tip = copy_entries[0][0]
+        tip, copied_at = copy_entries[0]
         for branch, branch_entries in entries.items():
-            arrivals = [action for sha, action in branch_entries if sha == tip]
-            # Oldest last: how `branch` first got to that commit.
-            if (
-                branch != copy
-                and arrivals
-                and not arrivals[-1].startswith("branch: Created from")
-            ):
+            arrivals = [time for sha, time in branch_entries if sha == tip]
+            if branch != copy and arrivals and min(arrivals) < copied_at:
                 copies.add((copy, branch))
     return copies
 

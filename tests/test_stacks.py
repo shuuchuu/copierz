@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from copierz.stacks import depth, find_parents, topological_order
 from tests.conftest import commit_file, git_out
 
@@ -74,10 +76,20 @@ def test_still_stacked_on_a_parent_rebased_since(project: Path) -> None:
     assert parents["gradio"] == "solution"
 
 
-def test_backup_of_a_branch_is_not_its_parent(project: Path) -> None:
+def _at(monkeypatch: pytest.MonkeyPatch, seconds: int) -> None:
+    # Reflog entries take the committer date: put the next git commands
+    # `seconds` after the fixture's commits.
+    monkeypatch.setenv("GIT_COMMITTER_DATE", f"{2_000_000_000 + seconds} +0000")
+
+
+def test_backup_of_a_branch_is_not_its_parent(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # caesar-cipher's case: main moved on after the backup, so its history
     # looks stacked on it.
+    _at(monkeypatch, 1)
     git_out(project, "branch", "backup/main", "main")
+    _at(monkeypatch, 2)
     commit_file(project, "main.txt", "x\n", "work on main")
 
     parents = find_parents(project, ["main", "backup/main"])
@@ -85,27 +97,37 @@ def test_backup_of_a_branch_is_not_its_parent(project: Path) -> None:
     assert parents == {"main": None, "backup/main": None}
 
 
-def test_new_branch_rebased_onto_another_is_not_its_parent(project: Path) -> None:
+def test_new_branch_rebased_onto_another_is_not_its_parent(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # A branch started for some later work, rebased onto main before its
     # first commit, while main moved on.
+    _at(monkeypatch, 1)
     git_out(project, "branch", "later", "main")
     commit_file(project, "main.txt", "x\n", "work on main")
+    _at(monkeypatch, 2)
     git_out(project, "checkout", "-q", "later")
-    git_out(project, "rebase", "-q", "main~0")
+    git_out(project, "rebase", "-q", "main")
     git_out(project, "checkout", "-q", "main")
+    _at(monkeypatch, 3)
     commit_file(project, "main.txt", "y\n", "more work on main")
 
     assert find_parents(project, ["main", "later"])["main"] is None
 
 
-def test_branch_created_from_a_fresh_copy_is_stacked_on_it(project: Path) -> None:
+def test_branch_created_from_a_fresh_copy_is_stacked_on_it(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Branches checked out from a clone's remote branches: solution was only
-    # created where it is, but solution-en was created from it, so it's still
-    # solution's child.
+    # created where it is, but solution-en was created from it afterwards,
+    # so it's still solution's child.
+    _at(monkeypatch, 1)
     _branch_with_commit(project, "work", "main", "solution.txt")
+    _at(monkeypatch, 2)
     git_out(project, "branch", "solution", "work")
     git_out(project, "checkout", "-q", "main")
     git_out(project, "branch", "-D", "work")
+    _at(monkeypatch, 3)
     _branch_with_commit(project, "solution-en", "solution", "solution-en.txt")
 
     assert find_parents(project, ["main", "solution", "solution-en"]) == {
@@ -113,3 +135,27 @@ def test_branch_created_from_a_fresh_copy_is_stacked_on_it(project: Path) -> Non
         "solution": "main",
         "solution-en": "solution",
     }
+
+
+@pytest.mark.parametrize("later", [0, 1])
+def test_branch_reset_onto_its_parent_is_stacked_on_it(
+    project: Path, monkeypatch: pytest.MonkeyPatch, later: int
+) -> None:
+    # linting's case: solution was rebased, then solution-en rebuilt on it
+    # by a reset to solution and a cherry-pick, by a script (same second)
+    # or by hand.
+    _branch_with_commit(project, "solution", "main", "solution.txt")
+    _branch_with_commit(project, "solution-en", "solution", "solution-en.txt")
+    translation = git_out(project, "rev-parse", "solution-en")
+    git_out(project, "checkout", "-q", "main")
+    commit_file(project, "main.txt", "x\n", "work on main")
+    _at(monkeypatch, 1)
+    git_out(project, "checkout", "-q", "solution")
+    git_out(project, "rebase", "-q", "main")
+    _at(monkeypatch, 1 + later)
+    git_out(project, "checkout", "-q", "-B", "solution-en", "solution")
+    git_out(project, "cherry-pick", translation)
+
+    parents = find_parents(project, ["main", "solution", "solution-en"])
+
+    assert parents["solution-en"] == "solution"

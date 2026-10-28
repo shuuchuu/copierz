@@ -110,9 +110,10 @@ tree.
 
 A copy of a branch's own past tip (a backup, or a branch made from it with
 no commits yet) looks just like a parent in the history, so copierz asks the
-reflogs: if the copy was only created, reset or rebased onto a commit the
-branch got to on its own, the branch isn't stacked on it. Reflogs expire
-(after 90 days by default), so `exclude` backups you keep longer.
+reflogs who got to that commit first: a copy arrives after the branch it
+copies, while a child is created, reset or rebased onto its parent after the
+parent got there. Reflogs expire (after 90 days by default), so `exclude`
+backups you keep longer.
 
 `copierz update` then only runs `copier update` on the bottom branch of each
 stack, and rebases the branches above onto their parent once it's done.

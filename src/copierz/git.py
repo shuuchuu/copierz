@@ -299,26 +299,27 @@ def reflog(repo: Path, branch: str) -> set[str]:
     return {sha for sha, _ in reflog_entries(repo, branch)}
 
 
-def reflog_entries(repo: Path, branch: str) -> list[tuple[str, str]]:
-    """What moved `branch` to each commit it pointed to, newest first.
+def reflog_entries(repo: Path, branch: str) -> list[tuple[str, int]]:
+    """When `branch` moved to each commit it pointed to, newest first.
 
     Returns:
-        `(sha, action)` pairs, the action as the reflog words it
-        (`commit: <subject>`, `branch: Created from main`, ...).
+        `(sha, unix time)` pairs.
     """
     out = _run(
         repo,
         "reflog",
         "show",
-        "--format=%H%x00%gs",
+        "--date=unix",
+        "--format=%H %gd",
         f"refs/heads/{branch}",
         check=False,
     ).stdout
-    return [
-        (sha, action)
-        for sha, _, action in (line.partition("\0") for line in out.splitlines())
-        if sha
-    ]
+    entries = []
+    for line in out.splitlines():
+        sha, _, selector = line.partition(" ")  # selector: `branch@{<time>}`
+        if sha:
+            entries.append((sha, int(selector.rpartition("@{")[2].rstrip("}"))))
+    return entries
 
 
 def push(
