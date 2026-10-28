@@ -72,3 +72,44 @@ def test_still_stacked_on_a_parent_rebased_since(project: Path) -> None:
     parents = find_parents(project, ["main", "gui", "solution", "gradio"])
 
     assert parents["gradio"] == "solution"
+
+
+def test_backup_of_a_branch_is_not_its_parent(project: Path) -> None:
+    # caesar-cipher's case: main moved on after the backup, so its history
+    # looks stacked on it.
+    git_out(project, "branch", "backup/main", "main")
+    commit_file(project, "main.txt", "x\n", "work on main")
+
+    parents = find_parents(project, ["main", "backup/main"])
+
+    assert parents == {"main": None, "backup/main": None}
+
+
+def test_new_branch_rebased_onto_another_is_not_its_parent(project: Path) -> None:
+    # A branch started for some later work, rebased onto main before its
+    # first commit, while main moved on.
+    git_out(project, "branch", "later", "main")
+    commit_file(project, "main.txt", "x\n", "work on main")
+    git_out(project, "checkout", "-q", "later")
+    git_out(project, "rebase", "-q", "main~0")
+    git_out(project, "checkout", "-q", "main")
+    commit_file(project, "main.txt", "y\n", "more work on main")
+
+    assert find_parents(project, ["main", "later"])["main"] is None
+
+
+def test_branch_created_from_a_fresh_copy_is_stacked_on_it(project: Path) -> None:
+    # Branches checked out from a clone's remote branches: solution was only
+    # created where it is, but solution-en was created from it, so it's still
+    # solution's child.
+    _branch_with_commit(project, "work", "main", "solution.txt")
+    git_out(project, "branch", "solution", "work")
+    git_out(project, "checkout", "-q", "main")
+    git_out(project, "branch", "-D", "work")
+    _branch_with_commit(project, "solution-en", "solution", "solution-en.txt")
+
+    assert find_parents(project, ["main", "solution", "solution-en"]) == {
+        "main": None,
+        "solution": "main",
+        "solution-en": "solution",
+    }

@@ -5,6 +5,10 @@ translation commit on top of `main`, ...) rebased onto a parent branch. A
 template update must then go through `copier update` on the bottom branch
 only, and reach the others by rebasing them, or the stack falls apart into
 divergent copies of the same update.
+
+History alone can't tell a parent from a copy of a branch's own past tip (a
+backup branch, a fresh branch with no commits yet): both are ancestors the
+branch has commits on top of. Reflogs can, see `_copies`.
 """
 
 from __future__ import annotations
@@ -47,20 +51,61 @@ def _is_stacked_on(repo: Path, branch: str, parent: str) -> int | None:
     return None
 
 
+# Reflog actions that move a branch to an existing commit, without making one.
+_FOLLOWING_ACTIONS = (
+    "branch: Created from",
+    "branch: Reset to",
+    "reset: moving to",
+    "rebase (finish)",
+)
+
+
+def _copies(repo: Path, branches: list[str]) -> set[tuple[str, str]]:
+    """Find the branches that are copies of another branch's past tip.
+
+    `copy` is a copy of `branch` when `copy` only followed it to its tip
+    (created, reset or rebased there), while `branch` got there on its own
+    (by committing, rebasing, ...) rather than by being created from it.
+    That's a backup of `branch`, or a branch made from it with no commits
+    yet: `branch` isn't stacked on it, whatever the history says.
+
+    Returns:
+        `(copy, branch)` pairs.
+    """
+    entries = {branch: git.reflog_entries(repo, branch) for branch in branches}
+    copies = set()
+    for copy, copy_entries in entries.items():
+        if not copy_entries or not copy_entries[0][1].startswith(_FOLLOWING_ACTIONS):
+            continue
+        tip = copy_entries[0][0]
+        for branch, branch_entries in entries.items():
+            arrivals = [action for sha, action in branch_entries if sha == tip]
+            # Oldest last: how `branch` first got to that commit.
+            if (
+                branch != copy
+                and arrivals
+                and not arrivals[-1].startswith("branch: Created from")
+            ):
+                copies.add((copy, branch))
+    return copies
+
+
 def find_parents(repo: Path, branches: list[str]) -> dict[str, str | None]:
     """Map each branch to the branch it's stacked on, among `branches`.
 
     When a branch sits on several (e.g. `solution` on both `gui` and
-    `main`, `gui` itself being on `main`), the closest one wins.
+    `main`, `gui` itself being on `main`), the closest one wins. A copy of
+    the branch's own past tip is never its parent.
 
     Returns:
         `{branch: parent or None}` for every branch in `branches`.
     """
+    copies = _copies(repo, branches)
     parents: dict[str, str | None] = {}
     for branch in branches:
         best: tuple[int, str] | None = None
         for candidate in branches:
-            if candidate == branch:
+            if candidate == branch or (candidate, branch) in copies:
                 continue
             depth = _is_stacked_on(repo, branch, candidate)
             if depth is not None and (best is None or depth > best[0]):

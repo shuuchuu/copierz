@@ -100,6 +100,12 @@ has none except template updates (commits touching the answers file). The
 closest such branch is the parent; `copierz status` shows the stacks as a
 tree.
 
+A copy of a branch's own past tip (a backup, or a branch made from it with
+no commits yet) looks just like a parent in the history, so copierz asks the
+reflogs: if the copy was only created, reset or rebased onto a commit the
+branch got to on its own, the branch isn't stacked on it. Reflogs expire
+(after 90 days by default), so `exclude` backups you keep longer.
+
 `copierz update` then only runs `copier update` on the bottom branch of each
 stack, and rebases the branches above onto their parent once it's done.
 Selecting any branch of a stack updates the whole stack. A branch that
