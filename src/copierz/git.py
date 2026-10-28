@@ -78,7 +78,10 @@ def worktrees(repo: Path) -> dict[str, Path]:
     out = _run(repo, "worktree", "list", "--porcelain").stdout
     result: dict[str, Path] = {}
     for block in out.split("\n\n"):
-        fields = dict(line.partition(" ")[::2] for line in block.splitlines())
+        fields = {
+            key: value
+            for key, _, value in (line.partition(" ") for line in block.splitlines())
+        }
         if "worktree" not in fields:
             continue
         path = Path(fields["worktree"])
