@@ -218,10 +218,23 @@ def rebase_continue(checkout: Path) -> bool:
     return result.returncode == 0
 
 
+def is_tracked(checkout: Path, file_path: str) -> bool:
+    result = _run(checkout, "ls-files", "--error-unmatch", "--", file_path, check=False)
+    return result.returncode == 0
+
+
+def checkout_ours(checkout: Path, file_path: str) -> None:
+    """Write HEAD's side of a conflicted file (the new base, during a rebase).
+
+    The file stays unmerged until it's staged.
+    """
+    _run(checkout, "checkout", "--ours", "--", file_path)
+
+
 def take_ours(checkout: Path, file_path: str) -> None:
     """Resolve a conflict with HEAD's version (the new base, during a rebase)."""
-    _run(checkout, "checkout", "--ours", "--", file_path)
-    _run(checkout, "add", "--", file_path)
+    checkout_ours(checkout, file_path)
+    stage(checkout, file_path)
 
 
 def rebase_abort(checkout: Path) -> None:
@@ -284,6 +297,10 @@ def push(
 
 def stage_all(checkout: Path) -> None:
     _run(checkout, "add", "-A")
+
+
+def stage(checkout: Path, file_path: str) -> None:
+    _run(checkout, "add", "--", file_path)
 
 
 def commit(checkout: Path, message: str, verify: bool = True) -> None:

@@ -43,7 +43,10 @@ $ copierz log                # template changes since the oldest version in use
 ```
 
 `copierz update` commits every update that applies cleanly (`--no-commit`
-to review them first, `--no-verify` to skip pre-commit hooks). Anything
+to review them first, `--no-verify` to skip pre-commit hooks). A tracked
+`uv.lock` is relocked into the update commit, since the template may have
+changed `pyproject.toml`; if `uv lock` fails, the update is left
+uncommitted, with uv's error, for you to fix and `copierz continue`. Anything
 that stops on conflicts is left for `copierz resolve`, which walks each one
 through your `git mergetool`, then offers to review the result in your
 `git difftool` and commit it.
@@ -100,7 +103,10 @@ stops on conflicts holds back the branches stacked on it, until `copierz
 resolve` (or `continue`) finishes it and rebases them. During these rebases
 the answers file follows the parent: a conflict there only comes from a
 stale template update made on the branch itself, so it's resolved with the
-parent's version, and a commit left empty by that is dropped. Rebasing
+parent's version, and a commit left empty by that is dropped. A `uv.lock`
+conflict is resolved by relocking from the parent's lock, and a branch whose
+lock is still stale once rebased (its own commits changed `pyproject.toml`)
+gets a `Relock uv.lock` commit on top. Rebasing
 rewrites those branches, so pushing them afterwards needs a force: see
 `copierz push --force` below.
 

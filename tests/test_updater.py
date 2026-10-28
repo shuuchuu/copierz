@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,7 +13,7 @@ from copierz.config import Config
 from copierz.discovery import discover, refresh
 from copierz.models import StatusKind
 from copierz.status import LatestRefs, repo_statuses
-from copierz.updater import OutcomeKind, Updater
+from copierz.updater import RELOCK_MESSAGE, OutcomeKind, Updater
 from tests.conftest import commit_file, git_out, init_repo
 
 if TYPE_CHECKING:
@@ -259,3 +261,145 @@ def test_rebase_replays_only_own_commits_when_parent_was_rewritten(
 
     assert git_out(project, "log", "--format=%s", "solution..gradio") == "Add gradio UI"
     assert git_out(project, "log", "--format=%s", "gui..solution") == "Add GUI"
+
+
+PYPROJECT = """\
+[project]
+name = "demo"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = []
+"""
+# What 0.2.0 of the locked template adds to pyproject.toml, as the real
+# template does with its dev tools.
+DEV_GROUP = "\n[dependency-groups]\ndev = []\n"
+# A branch's own dependency change, far enough from DEV_GROUP for
+# pyproject.toml to merge cleanly, but not for uv.lock.
+EXTRA = "optional-dependencies = { extra = [] }\n"
+
+needs_uv = pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+
+
+def _uv_lock(checkout: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["uv", "lock", "--quiet", *args],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _add_extra(checkout: Path) -> None:
+    pyproject = checkout / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text().replace("[project]\n", f"[project]\n{EXTRA}")
+    )
+
+
+@pytest.fixture
+def locked_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Nothing to resolve from an index: these projects have no dependencies.
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    template = init_repo(tmp_path / "template")
+    (template / "copier.yml").write_text("_subdirectory: template\n")
+    template_dir = template / "template"
+    template_dir.mkdir()
+    (template_dir / "{{_copier_conf.answers_file}}.jinja").write_text(
+        "{{ _copier_answers|to_nice_yaml -}}\n"
+    )
+    commit_file(template_dir, "pyproject.toml", PYPROJECT, "v1")
+    git_out(template, "tag", "0.1.0")
+    commit_file(template_dir, "pyproject.toml", PYPROJECT + DEV_GROUP, "v2")
+    git_out(template, "tag", "0.2.0")
+
+    repo = init_repo(tmp_path / "project")
+    (repo / ".copier-answers.yml").write_text(
+        f"_commit: 0.1.0\n_src_path: {template}\n"
+    )
+    (repo / "pyproject.toml").write_text(PYPROJECT)
+    assert _uv_lock(repo).returncode == 0
+    commit_file(repo, "uv.lock", (repo / "uv.lock").read_text(), "initial")
+    git_out(repo, "branch", "-M", "main")
+    return repo
+
+
+@needs_uv
+def test_update_commits_a_relocked_uv_lock(
+    locked_project: Path, updater: Updater
+) -> None:
+    (outcome,) = updater.update_repo(_ordered(locked_project))
+
+    assert outcome.kind is OutcomeKind.UPDATED, outcome.detail
+    assert git.is_clean(locked_project)
+    assert "uv.lock" in git_out(locked_project, "show", "--name-only", "HEAD")
+    assert _uv_lock(locked_project, "--check").returncode == 0
+
+
+@needs_uv
+def test_lock_conflicts_in_a_rebase_are_relocked(
+    locked_project: Path, updater: Updater
+) -> None:
+    git_out(locked_project, "checkout", "-q", "-b", "solution")
+    _add_extra(locked_project)
+    assert _uv_lock(locked_project).returncode == 0
+    commit_file(
+        locked_project, "uv.lock", (locked_project / "uv.lock").read_text(), "Add extra"
+    )
+    _move_away(locked_project)
+
+    outcomes = updater.update_repo(_ordered(locked_project))
+
+    assert [(o.target.branch, o.kind) for o in outcomes] == [
+        ("main", OutcomeKind.UPDATED),
+        ("solution", OutcomeKind.REBASED),
+    ], [o.detail for o in outcomes]
+    assert (
+        git_out(locked_project, "log", "--format=%s", "main..solution") == "Add extra"
+    )
+    lock = git.show_file_at_ref(locked_project, "solution", "uv.lock") or ""
+    assert "provides-extras" in lock
+    assert "requires-dev" in lock
+
+
+@needs_uv
+def test_rebased_branch_with_a_stale_lock_gets_a_relock_commit(
+    locked_project: Path, updater: Updater
+) -> None:
+    git_out(locked_project, "checkout", "-q", "-b", "solution")
+    _add_extra(locked_project)
+    commit_file(
+        locked_project,
+        "pyproject.toml",
+        (locked_project / "pyproject.toml").read_text(),
+        "Add extra without relocking",
+    )
+    _move_away(locked_project)
+
+    *_, outcome = updater.update_repo(_ordered(locked_project))
+
+    assert outcome.kind is OutcomeKind.REBASED
+    assert outcome.detail == "onto main, relocked"
+    assert git_out(locked_project, "log", "-1", "--format=%s", "solution") == (
+        RELOCK_MESSAGE
+    )
+    lock = git.show_file_at_ref(locked_project, "solution", "uv.lock") or ""
+    assert "provides-extras" in lock
+
+
+@needs_uv
+def test_update_stays_uncommitted_when_uv_lock_fails(
+    locked_project: Path, updater: Updater
+) -> None:
+    commit_file(
+        locked_project,
+        "pyproject.toml",
+        PYPROJECT.replace(">=3.11", "not a specifier"),
+        "Break dependencies",
+    )
+
+    (outcome,) = updater.update_repo(_ordered(locked_project))
+
+    assert outcome.kind is OutcomeKind.UNCOMMITTED
+    assert outcome.detail.startswith("uv lock failed: ")
+    assert git_out(locked_project, "log", "-1", "--format=%s") == "Break dependencies"
