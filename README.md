@@ -25,7 +25,14 @@ There's no list of repos to maintain: on every run copierz scans the roots
 for git repos, and every local branch of each (via `git show
 branch:.copier-answers.yml`, no checkout needed) for a Copier answers file.
 It stops descending at a repo, and skips hidden directories and linked
-worktrees. The template comes from each answers file's `_src_path`; a
+worktrees.
+
+A branch can also carry Copier projects nested in subdirectories, each with
+its own answers file (say a vendored `labs/`): each is tracked on its own,
+shown as `branch:labs`, and gets an update commit of its own (`Update
+template to 0.1.8 in labs`). Stacks are still made of branches: a stacked
+branch is rebased once, whatever projects it carries. Exclude a nested
+project with its path, `~/repos/slides/labs`. The template comes from each answers file's `_src_path`; a
 relative one is resolved against the repo's own parent directory, which is
 where `copier copy` is virtually always run from.
 
@@ -70,12 +77,13 @@ what would happen.
 `status`, `update`, `continue`, `abort`, `push` and `log` take `--json` to print a
 single JSON document on stdout (errors go to stderr, exit code 2):
 
-- `status --json`: `{"branches": [{repo, branch, template, status,
-  current, latest, parent, checkout, unmerged, detail}]}`, with `status`
+- `status --json`: `{"branches": [{repo, branch, subproject, template,
+  status, current, latest, parent, checkout, unmerged, detail}]}`, with
+  `subproject` `null` for the repo's root project, and `status`
   one of `up_to_date`, `behind`, `blocked`, `in_progress`, `conflicts`,
   `error`.
 - `update --json` / `continue --json`: `{"outcomes": [{repo, branch,
-  outcome, checkout, detail}]}`, with `outcome` one of `updated`,
+  subproject, outcome, checkout, detail}]}`, with `outcome` one of `updated`,
   `rebased`, `uncommitted`, `conflicts`, `skipped`, `failed`. The exit code
   is 1 if anything stopped (conflicts, uncommitted, failed).
 - `abort --json --yes`: `{"aborted": [...]}`, same fields as `status`.

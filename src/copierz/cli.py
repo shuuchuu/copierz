@@ -155,8 +155,11 @@ def _print_statuses(statuses: list[BranchStatus]) -> None:
             detail = status.detail
             if status.kind in PENDING and status.checkout is not None:
                 detail = f"{detail} ({_pretty(status.checkout)})".strip()
+            name = status.target.branch
+            if status.target.subdir:
+                name += f":{status.target.subdir}"
             table.add_row(
-                branch + status.target.branch,
+                branch + name,
                 _versions(status),
                 Text(status.kind.value, style=STATUS_STYLE[status.kind]),
                 detail,
@@ -191,6 +194,7 @@ def _status_json(status: BranchStatus) -> dict[str, object]:
     return {
         "repo": str(status.target.repo),
         "branch": status.target.branch,
+        "subproject": status.target.subdir or None,
         "template": str(status.target.template),
         "status": status.kind.name.lower(),
         "current": status.current_ref,
@@ -206,6 +210,7 @@ def _outcome_json(outcome: Outcome) -> dict[str, object]:
     return {
         "repo": str(outcome.target.repo),
         "branch": outcome.target.branch,
+        "subproject": outcome.target.subdir or None,
         "outcome": outcome.kind.name.lower(),
         "checkout": str(outcome.checkout) if outcome.checkout else None,
         "detail": outcome.detail,
@@ -482,6 +487,11 @@ def _cmd_push(args: argparse.Namespace) -> int:
     targets = _load_targets(args)
     if not args.all:
         targets = _select_targets(targets, args.selectors or ["."])
+    # One push per branch, whatever projects it carries.
+    branches: dict[tuple[Path, str], Target] = {}
+    for target in targets:
+        branches.setdefault((target.repo, target.branch), target)
+    targets = list(branches.values())
     if not args.no_fetch:
         remotes = {
             (t.repo, tracked[0])

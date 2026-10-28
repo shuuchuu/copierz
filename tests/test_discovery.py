@@ -70,3 +70,28 @@ def test_relative_src_path_resolves_against_repos_own_parent(tmp_path: Path) -> 
     (target,) = discover(Config(roots=[tmp_path / "repos"]))
 
     assert target.template == tmp_path / "repos" / "shuuchuu" / "template"
+
+
+def test_nested_projects_are_targets_of_their_own(
+    tmp_path: Path, project: Path
+) -> None:
+    (project / "labs").mkdir()
+    commit_file(project / "labs", ".copier-answers.yml", _answers("/t"), "Add labs")
+
+    targets = discover(Config(roots=[tmp_path]))
+
+    assert [(t.branch, t.subdir, t.label) for t in targets] == [
+        ("main", "", "project@main"),
+        ("main", "labs", "project@main:labs"),
+    ]
+    assert targets[1].answers_file == "labs/.copier-answers.yml"
+    assert targets[1].workspace_root == project
+
+
+def test_nested_project_exclusion(tmp_path: Path, project: Path) -> None:
+    (project / "labs").mkdir()
+    commit_file(project / "labs", ".copier-answers.yml", _answers("/t"), "Add labs")
+
+    targets = discover(Config(roots=[tmp_path], exclude=[str(project / "labs")]))
+
+    assert [(t.branch, t.subdir) for t in targets] == [("main", "")]

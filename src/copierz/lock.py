@@ -24,7 +24,7 @@ class LockError(RuntimeError):
 
 
 def relock(checkout: Path) -> bool:
-    """Run `uv lock` in `checkout` if it tracks a `uv.lock`.
+    """Run `uv lock` in `checkout` (a project's directory) if it tracks a `uv.lock`.
 
     Returns:
         Whether `uv.lock` now differs from HEAD's.
@@ -47,4 +47,4 @@ def relock(checkout: Path) -> bool:
     )
     if result.returncode != 0:
         raise LockError(result.stderr.strip() or f"exit code {result.returncode}")
-    return LOCK_FILE in git.changed_vs_head(checkout)
+    return git.differs_from_head(checkout, LOCK_FILE)

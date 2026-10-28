@@ -58,6 +58,16 @@ def list_local_branches(repo: Path) -> list[str]:
     return _lines(out)
 
 
+def list_files(repo: Path, ref: str) -> list[str]:
+    """List every file committed on `ref`.
+
+    Returns:
+        Their paths, relative to the repo root.
+    """
+    out = _run(repo, "ls-tree", "-r", "-z", "--name-only", ref).stdout
+    return [path for path in out.split("\0") if path]
+
+
 def show_file_at_ref(repo: Path, ref: str, file_path: str) -> str | None:
     result = _run(repo, "show", f"{ref}:{file_path}", check=False)
     if result.returncode != 0:
@@ -216,6 +226,16 @@ def rebase_continue(checkout: Path) -> bool:
     action = "--skip" if nothing_staged.returncode == 0 else "--continue"
     result = _run(checkout, "rebase", action, check=False, env={"GIT_EDITOR": "true"})
     return result.returncode == 0
+
+
+def differs_from_head(checkout: Path, file_path: str) -> bool:
+    """Whether `file_path` (relative to `checkout`) differs from HEAD's.
+
+    Returns:
+        True if it does, staged or not.
+    """
+    result = _run(checkout, "diff", "--quiet", "HEAD", "--", file_path, check=False)
+    return result.returncode != 0
 
 
 def is_tracked(checkout: Path, file_path: str) -> bool:

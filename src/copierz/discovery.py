@@ -1,4 +1,9 @@
-"""Find every branch of every git repo under the roots that carries Copier answers."""
+"""Find every branch of every git repo under the roots that carries Copier answers.
+
+A branch can carry several Copier projects: the repo itself, and projects
+nested in its subdirectories (each with its own answers file), such as a
+vendored repo. Each one is a target of its own.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from copierz import git
-from copierz.template_source import read_answers
+from copierz.template_source import answers_path, project_dirs, read_answers
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -20,15 +25,30 @@ SKIP_DIR_NAMES = {"node_modules"}
 
 @dataclass(frozen=True)
 class Target:
-    """One branch of one repo generated from a Copier template."""
+    """One Copier project on one branch of a repo.
+
+    Attributes:
+        repo: The repo's main checkout.
+        branch: The branch.
+        answers: The project's answers, as committed on the branch.
+        subdir: Where the project is, relative to the repo root: "" for the
+            repo itself, else a nested project's directory.
+    """
 
     repo: Path
     branch: str
     answers: Answers
+    subdir: str = ""
 
     @property
     def label(self) -> str:
-        return f"{self.repo.name}@{self.branch}"
+        label = f"{self.repo.name}@{self.branch}"
+        return f"{label}:{self.subdir}" if self.subdir else label
+
+    @property
+    def answers_file(self) -> str:
+        """The project's answers file, relative to the repo root."""
+        return answers_path(self.subdir)
 
     @property
     def workspace_root(self) -> Path:
@@ -36,13 +56,14 @@ class Target:
 
         Copier resolves a relative `_src_path` against the current working
         directory at update time, so it must match wherever `copier copy`
-        was originally run from. That's virtually always the repo's own
+        was originally run from. That's virtually always the project's own
         parent directory (you `cd` there, then `copier copy <src> <name>`).
 
         Returns:
-            The repo's parent directory.
+            The parent directory of the project (of the repo, for its root
+            project).
         """
-        return self.repo.parent
+        return (self.repo / self.subdir).parent
 
     @property
     def template(self) -> Path:
@@ -60,8 +81,9 @@ def discover(config: Config, roots: Iterable[Path] | None = None) -> list[Target
     is left alone), and skips hidden directories and linked worktrees.
 
     Returns:
-        One target per non-excluded repo branch carrying Copier answers,
-        sorted by repo path then branch name.
+        One target per Copier project on each non-excluded repo branch,
+        sorted by repo path, branch name, then project (root first). A nested
+        project is excluded with its path (`/path/to/repo/subdir`).
     """
     targets = []
     seen: set[Path] = set()
@@ -73,10 +95,13 @@ def discover(config: Config, roots: Iterable[Path] | None = None) -> list[Target
             for branch in git.list_local_branches(repo):
                 if config.is_excluded(repo, branch):
                     continue
-                answers = read_answers(repo, branch)
-                if answers is not None:
-                    targets.append(Target(repo, branch, answers))
-    return sorted(targets, key=lambda t: (str(t.repo), t.branch))
+                for subdir in project_dirs(repo, branch):
+                    if subdir and config.is_excluded(repo / subdir, branch):
+                        continue
+                    answers = read_answers(repo, branch, answers_path(subdir))
+                    if answers is not None:
+                        targets.append(Target(repo, branch, answers, subdir))
+    return sorted(targets, key=lambda t: (str(t.repo), t.branch, t.subdir))
 
 
 def refresh(targets: Iterable[Target]) -> list[Target]:
@@ -86,9 +111,10 @@ def refresh(targets: Iterable[Target]) -> list[Target]:
         The targets whose branch still carries an answers file.
     """
     return [
-        Target(target.repo, target.branch, answers)
+        Target(target.repo, target.branch, answers, target.subdir)
         for target in targets
-        if (answers := read_answers(target.repo, target.branch)) is not None
+        if (answers := read_answers(target.repo, target.branch, target.answers_file))
+        is not None
     ]
 
 

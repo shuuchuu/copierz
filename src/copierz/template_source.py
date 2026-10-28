@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 import yaml
 from packaging.version import InvalidVersion, Version
 
-from copierz.git import GitError, show_file_at_ref
+from copierz.git import GitError, list_files, show_file_at_ref
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,10 +24,35 @@ class Answers:
     commit: str | None
 
 
+def answers_path(subdir: str) -> str:
+    """Where the answers file of the project at `subdir` is.
+
+    Returns:
+        Its path relative to the repo root, `subdir` being "" for the root
+        project.
+    """
+    return f"{subdir}/{ANSWERS_FILE}" if subdir else ANSWERS_FILE
+
+
+def project_dirs(repo: Path, ref: str) -> list[str]:
+    """Find the Copier projects committed on `ref`: the repo itself, or nested.
+
+    Returns:
+        The directory of each answers file relative to the repo root ("" for
+        the root), root first, then in path order.
+    """
+    nested_suffix = f"/{ANSWERS_FILE}"
+    return sorted(
+        "" if path == ANSWERS_FILE else str(PurePosixPath(path).parent)
+        for path in list_files(repo, ref)
+        if path == ANSWERS_FILE or path.endswith(nested_suffix)
+    )
+
+
 def read_answers(
     repo: Path, ref: str, answers_relpath: str = ANSWERS_FILE
 ) -> Answers | None:
-    """Read `.copier-answers.yml` as committed on `ref`, without checking it out.
+    """Read an answers file as committed on `ref`, without checking it out.
 
     Returns:
         The parsed answers, or `None` if `ref` has no answers file.

@@ -9,6 +9,10 @@ is removed once its branch is committed; it stays (and shows up in
 A tracked `uv.lock` is relocked along the way: into the update commit on a
 stack's bottom branch, and in a commit of its own on a rebased branch whose
 lock went stale.
+
+A branch carrying several Copier projects (nested ones, see
+`copierz.discovery`) gets one update commit per project, but is rebased
+once, as a whole.
 """
 
 from __future__ import annotations
@@ -17,13 +21,15 @@ import contextlib
 import hashlib
 from dataclasses import dataclass
 from enum import Enum
+from itertools import groupby
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 import copier
 
 from copierz import git, lock
 from copierz.models import StatusKind
-from copierz.template_source import ANSWERS_FILE
+from copierz.template_source import ANSWERS_FILE, project_dirs
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -57,9 +63,13 @@ class Outcome:
 RELOCK_MESSAGE = "Relock uv.lock"
 
 
-def commit_message(template: Path, ref: str | None) -> str:
+def commit_message(template: Path, ref: str | None, subdir: str = "") -> str:
     name = template.name if "template" in template.name else f"{template.name} template"
-    return f"Update {name} to {ref}" if ref else f"Update {name}"
+    message = f"Update {name} to {ref}" if ref else f"Update {name}"
+    return f"{message} in {subdir}" if subdir else message
+
+
+BLOCKING_KINDS = {StatusKind.BLOCKED, StatusKind.CONFLICTS, StatusKind.IN_PROGRESS}
 
 
 class Updater:
@@ -85,53 +95,76 @@ class Updater:
         that fails holds back the branches stacked on it.
 
         Args:
-            statuses: Statuses of branches of one repo, parents first (as
-                returned by `copierz.status.repo_statuses`).
+            statuses: Statuses of the projects on branches of one repo,
+                parents first, each branch's projects together (as returned
+                by `copierz.status.repo_statuses`).
 
         Returns:
-            One outcome per branch that needed something done.
+            One outcome per project that needed something done; a rebase
+            counts for the branch's first project.
         """
         outcomes = []
         held_back: set[str] = set()
-        for status in statuses:
-            outcome = self._update_branch(status, held_back)
-            if outcome is None:
-                continue
-            if not outcome.kind.ok:
-                held_back.add(status.target.branch)
-            self.report(outcome)
-            outcomes.append(outcome)
+        for branch, branch_statuses in groupby(statuses, lambda s: s.target.branch):
+            for outcome in self._update_branch(list(branch_statuses), held_back):
+                if not outcome.kind.ok:
+                    held_back.add(branch)
+                self.report(outcome)
+                outcomes.append(outcome)
         return outcomes
 
     def _update_branch(
-        self, status: BranchStatus, held_back: set[str]
-    ) -> Outcome | None:
-        target, parent = status.target, status.parent
+        self, statuses: list[BranchStatus], held_back: set[str]
+    ) -> list[Outcome]:
+        first, parent = statuses[0], statuses[0].parent
         if parent is not None and parent in held_back:
-            return Outcome(target, OutcomeKind.SKIPPED, f"waiting for {parent}")
-        if status.kind in {
-            StatusKind.ERROR,
-            StatusKind.BLOCKED,
-            StatusKind.CONFLICTS,
-            StatusKind.IN_PROGRESS,
-        }:
-            return Outcome(
-                target, OutcomeKind.SKIPPED, f"{status.kind.value}: {status.detail}"
-            )
+            return [Outcome(first.target, OutcomeKind.SKIPPED, f"waiting for {parent}")]
+        skipped = [
+            Outcome(s.target, OutcomeKind.SKIPPED, f"{s.kind.value}: {s.detail}")
+            for s in statuses
+            if s.kind in BLOCKING_KINDS
+        ]
+        if skipped:  # The checkout isn't clean: nothing more can happen there.
+            return skipped
+        skipped = [
+            Outcome(s.target, OutcomeKind.SKIPPED, f"{s.kind.value}: {s.detail}")
+            for s in statuses
+            if s.kind is StatusKind.ERROR
+        ]
         if parent is None:
-            if status.kind is StatusKind.UP_TO_DATE:
-                return None
-            return self._copier_update(status)
-        repo = target.repo
-        if git.merge_base(repo, parent, target.branch) == git.rev_parse(repo, parent):
-            if status.kind is StatusKind.UP_TO_DATE:
-                return None
-            return Outcome(
-                target,
-                OutcomeKind.FAILED,
-                f"stacked on {parent} but behind it; update it by hand",
+            return skipped + self._update_projects(
+                [s for s in statuses if s.kind is not StatusKind.ERROR]
             )
-        return self.rebase(target, parent)
+        if skipped:
+            return skipped
+        repo, branch = first.target.repo, first.target.branch
+        if git.merge_base(repo, parent, branch) == git.rev_parse(repo, parent):
+            if all(s.kind is StatusKind.UP_TO_DATE for s in statuses):
+                return []
+            detail = f"stacked on {parent} but behind it; update it by hand"
+            return [Outcome(first.target, OutcomeKind.FAILED, detail)]
+        return [self.rebase(first.target, parent)]
+
+    def _update_projects(self, statuses: list[BranchStatus]) -> list[Outcome]:
+        """`copier update` each project of a branch, stopping at the first failure.
+
+        Returns:
+            One outcome per project that was behind.
+        """
+        outcomes = []
+        stopped: Outcome | None = None
+        for status in statuses:
+            if status.kind is StatusKind.UP_TO_DATE:
+                continue
+            if stopped is not None:
+                detail = f"waiting for {stopped.target.label}"
+                outcomes.append(Outcome(status.target, OutcomeKind.SKIPPED, detail))
+                continue
+            outcome = self._copier_update(status)
+            if not outcome.kind.ok:
+                stopped = outcome
+            outcomes.append(outcome)
+        return outcomes
 
     def checkout(self, target: Target) -> Path:
         """Where `target`'s branch is checked out, adding a worktree if nowhere.
@@ -170,7 +203,7 @@ class Updater:
         try:
             with contextlib.chdir(target.workspace_root):
                 copier.run_update(
-                    dst_path=checkout,
+                    dst_path=checkout / target.subdir,
                     defaults=True,
                     skip_answered=True,
                     overwrite=True,
@@ -201,7 +234,7 @@ class Updater:
         target = status.target
         versions = f"{status.current_ref} → {status.latest_ref}"
         try:
-            lock.relock(checkout)
+            lock.relock(checkout / target.subdir)
         except lock.LockError as exc:
             detail = f"uv lock failed: {exc}"
             return Outcome(target, OutcomeKind.UNCOMMITTED, detail, checkout)
@@ -211,7 +244,7 @@ class Updater:
         try:
             git.commit(
                 checkout,
-                commit_message(target.template, status.latest_ref),
+                commit_message(target.template, status.latest_ref, target.subdir),
                 verify=self.verify,
             )
         except git.GitError as exc:
@@ -240,52 +273,58 @@ class Updater:
     def _rebased(self, target: Target, parent: str | None, checkout: Path) -> Outcome:
         """Relock a freshly rebased branch if needed, then drop its worktree.
 
-        The branch's own commits may change `pyproject.toml` on top of a
-        parent whose `uv.lock` moved. A relock is committed without hooks,
-        like the rebase itself: it only touches the lock.
+        The branch's own commits may change a project's `pyproject.toml` on
+        top of a parent whose `uv.lock` moved. The locks of all the branch's
+        projects are relocked in one commit, without hooks like the rebase
+        itself: it only touches locks.
 
         Returns:
-            REBASED, saying so if the lock is left stale because `uv lock`
+            REBASED, saying so if a lock is left stale because `uv lock`
             failed.
         """
-        detail = f"onto {parent}"
-        try:
-            if lock.relock(checkout):
-                git.stage(checkout, lock.LOCK_FILE)
-                git.commit(checkout, RELOCK_MESSAGE, verify=False)
-                detail += ", relocked"
-        except lock.LockError as exc:
-            detail += f"; uv.lock left stale, uv lock failed: {exc}"
+        relocked, failures = False, []
+        for subdir in project_dirs(checkout, "HEAD"):
+            try:
+                if lock.relock(checkout / subdir):
+                    git.stage(checkout / subdir, lock.LOCK_FILE)
+                    relocked = True
+            except lock.LockError as exc:
+                where = f"{subdir}/{lock.LOCK_FILE}" if subdir else lock.LOCK_FILE
+                failures.append(f"; {where} left stale, uv lock failed: {exc}")
+        if relocked:
+            git.commit(checkout, RELOCK_MESSAGE, verify=False)
+        detail = f"onto {parent}{', relocked' if relocked else ''}{''.join(failures)}"
         self.release(target, checkout)
         return Outcome(target, OutcomeKind.REBASED, detail)
 
     @staticmethod
     def _drive_rebase(checkout: Path) -> bool:
-        """Carry a stopped rebase on while only the answers file or lock conflicts.
+        """Carry a stopped rebase on while only answers files or locks conflict.
 
-        Within a stack, the answers file follows the parent branch: a
-        conflict there comes from a stale template update made on the branch
-        itself, and the parent's version is the newer one. A commit left
-        empty by that is skipped. `uv.lock` follows the parent too, relocked
-        to take in the commit's own `pyproject.toml` changes.
+        Within a stack, answers files follow the parent branch: a conflict
+        there comes from a stale template update made on the branch itself,
+        and the parent's version is the newer one. A commit left empty by
+        that is skipped. A `uv.lock` follows the parent too, relocked to take
+        in the commit's own `pyproject.toml` changes.
 
         Returns:
             True once the rebase is complete, False if it stopped on other
             conflicts, `uv lock` failed (or for any other reason).
         """
         while git.is_rebasing(checkout):
-            unmerged = set(git.unmerged_files(checkout))
-            if unmerged - {ANSWERS_FILE, lock.LOCK_FILE}:
+            unmerged = [PurePosixPath(f) for f in git.unmerged_files(checkout)]
+            if any(f.name not in {ANSWERS_FILE, lock.LOCK_FILE} for f in unmerged):
                 return False
-            if ANSWERS_FILE in unmerged:
-                git.take_ours(checkout, ANSWERS_FILE)
-            if lock.LOCK_FILE in unmerged:
-                git.checkout_ours(checkout, lock.LOCK_FILE)
+            for path in unmerged:
+                if path.name == ANSWERS_FILE:
+                    git.take_ours(checkout, str(path))
+                    continue
+                git.checkout_ours(checkout, str(path))
                 try:
-                    lock.relock(checkout)
+                    lock.relock(checkout / path.parent)
                 except lock.LockError:
                     return False
-                git.stage(checkout, lock.LOCK_FILE)
+                git.stage(checkout, str(path))
             if not git.rebase_continue(checkout) and not git.unmerged_files(checkout):
                 return False
         return True

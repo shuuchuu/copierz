@@ -28,13 +28,14 @@ def updater(tmp_path: Path) -> Updater:
     return Updater(tmp_path / "cache")
 
 
-def _statuses(repo: Path) -> dict[str, BranchStatus]:
-    targets = refresh(discover(Config(roots=[repo])))
-    return {s.target.branch: s for s in repo_statuses(targets, LatestRefs())}
-
-
 def _ordered(repo: Path) -> list[BranchStatus]:
-    return list(_statuses(repo).values())
+    targets = refresh(discover(Config(roots=[repo])))
+    return repo_statuses(targets, LatestRefs())
+
+
+def _statuses(repo: Path) -> dict[str, BranchStatus]:
+    # Keyed by `branch`, or `branch:subdir` for a nested project.
+    return {s.target.label.partition("@")[2]: s for s in _ordered(repo)}
 
 
 def _move_away(repo: Path) -> None:
@@ -261,6 +262,128 @@ def test_rebase_replays_only_own_commits_when_parent_was_rewritten(
 
     assert git_out(project, "log", "--format=%s", "solution..gradio") == "Add gradio UI"
     assert git_out(project, "log", "--format=%s", "gui..solution") == "Add GUI"
+
+
+def _add_nested_project(repo: Path, subdir: str = "labs") -> None:
+    # The same template as the root project, rendered at 0.1.0 in `subdir`.
+    answers = (repo / ".copier-answers.yml").read_text()
+    (repo / subdir).mkdir()
+    (repo / subdir / "greeting.txt").write_text("hello\n")
+    commit_file(repo / subdir, ".copier-answers.yml", answers, f"Add {subdir}")
+
+
+def test_nested_project_gets_an_update_commit_of_its_own(
+    project: Path, updater: Updater
+) -> None:
+    _add_nested_project(project)
+
+    outcomes = updater.update_repo(_ordered(project))
+
+    assert [(o.target.label, o.kind) for o in outcomes] == [
+        ("project@main", OutcomeKind.UPDATED),
+        ("project@main:labs", OutcomeKind.UPDATED),
+    ]
+    assert git_out(project, "log", "-2", "--format=%s").splitlines() == [
+        "Update template to 0.2.0 in labs",
+        "Update template to 0.2.0",
+    ]
+    assert (project / "labs" / "greeting.txt").read_text() == "hello world\n"
+    assert {s.kind for s in _ordered(project)} == {StatusKind.UP_TO_DATE}
+
+
+def test_branch_with_a_nested_project_is_rebased_once(
+    project: Path, updater: Updater
+) -> None:
+    _add_nested_project(project)
+    git_out(project, "checkout", "-q", "-b", "solution")
+    commit_file(project, "solution.txt", "42\n", "Add solution")
+    _move_away(project)
+
+    statuses = _ordered(project)
+    assert [(s.target.label, s.parent) for s in statuses] == [
+        ("project@main", None),
+        ("project@main:labs", None),
+        ("project@solution", "main"),
+        ("project@solution:labs", "main"),
+    ]
+    outcomes = updater.update_repo(statuses)
+
+    assert [(o.target.label, o.kind) for o in outcomes] == [
+        ("project@main", OutcomeKind.UPDATED),
+        ("project@main:labs", OutcomeKind.UPDATED),
+        ("project@solution", OutcomeKind.REBASED),
+    ]
+    assert git_out(project, "log", "--format=%s", "main..solution") == "Add solution"
+    assert {s.kind for s in _ordered(project)} == {StatusKind.UP_TO_DATE}
+
+
+def test_conflict_in_a_nested_project_only_stops_that_project(
+    project: Path, updater: Updater
+) -> None:
+    _add_nested_project(project)
+    commit_file(project / "labs", "greeting.txt", "hi\n", "Diverge labs")
+
+    outcomes = updater.update_repo(_ordered(project))
+
+    assert [(o.target.label, o.kind) for o in outcomes] == [
+        ("project@main", OutcomeKind.UPDATED),
+        ("project@main:labs", OutcomeKind.CONFLICTS),
+    ]
+    root, labs = _ordered(project)
+    assert root.kind is StatusKind.UP_TO_DATE
+    assert labs.kind is StatusKind.CONFLICTS
+    assert labs.unmerged == ("labs/greeting.txt",)
+
+    (project / "labs" / "greeting.txt").write_text("hi world\n")
+    git.stage_all(project)
+    assert updater.resume(_ordered(project)[1]).kind is OutcomeKind.UPDATED
+    assert git_out(project, "log", "-1", "--format=%s") == (
+        "Update template to 0.2.0 in labs"
+    )
+
+
+def test_stopped_rebase_shows_once_and_blocks_nested_projects(
+    project: Path, updater: Updater
+) -> None:
+    _add_nested_project(project)
+    git_out(project, "checkout", "-q", "-b", "solution")
+    commit_file(project, "greeting.txt", "hello solution\n", "Add solution")
+    _move_away(project)
+
+    outcomes = updater.update_repo(_ordered(project))
+
+    assert [(o.target.label, o.kind) for o in outcomes][-1] == (
+        "project@solution",
+        OutcomeKind.CONFLICTS,
+    )
+    statuses = _statuses(project)
+    assert statuses["solution"].kind is StatusKind.CONFLICTS
+    assert statuses["solution:labs"].kind is StatusKind.BLOCKED
+    assert statuses["solution:labs"].detail == "waiting for the rebase onto main"
+
+    checkout = statuses["solution"].checkout
+    assert checkout is not None
+    (checkout / "greeting.txt").write_text("hello world solution\n")
+    git.stage_all(checkout)
+    assert updater.resume(_statuses(project)["solution"]).kind is OutcomeKind.REBASED
+    assert {s.kind for s in _ordered(project)} == {StatusKind.UP_TO_DATE}
+
+
+def test_stale_nested_template_updates_are_dropped_in_a_rebase(
+    project: Path, updater: Updater
+) -> None:
+    _add_nested_project(project)
+    git_out(project, "checkout", "-q", "-b", "solution")
+    commit_file(project, "solution.txt", "42\n", "Add solution")
+    answers = (project / "labs" / ".copier-answers.yml").read_text()
+    stale = answers.replace("_commit: 0.1.0", "_commit: 0.1.0-1-gstale")
+    commit_file(project / "labs", ".copier-answers.yml", stale, "Stale update")
+    _move_away(project)
+
+    *_, outcome = updater.update_repo(_ordered(project))
+
+    assert outcome.kind is OutcomeKind.REBASED, outcome.detail
+    assert git_out(project, "log", "--format=%s", "main..solution") == "Add solution"
 
 
 PYPROJECT = """\

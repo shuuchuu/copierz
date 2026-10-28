@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from itertools import groupby
 from typing import TYPE_CHECKING
 
 from copierz import git
 from copierz.models import BranchStatus, StatusKind
 from copierz.stacks import find_parents, topological_order
-from copierz.template_source import ANSWERS_FILE, latest_template_ref
+from copierz.template_source import latest_template_ref
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -58,12 +59,19 @@ def compute_statuses(
 def repo_statuses(targets: list[Target], latest: LatestRefs) -> list[BranchStatus]:
     """Compute the statuses of targets that all belong to the same repo.
 
+    Stacks are made of branches, whatever projects they carry: a stopped
+    rebase shows on the branch's first project (its root one, usually).
+
     Returns:
-        One status per target, each parent branch before its children.
+        One status per target, each parent branch before its children, and
+        a branch's projects in their original order.
     """
     repo = targets[0].repo
-    by_branch = {t.branch: t for t in targets}
-    parents = find_parents(repo, list(by_branch))
+    by_branch: dict[str, list[Target]] = defaultdict(list)
+    for target in targets:
+        by_branch[target.branch].append(target)
+    answers_files = sorted({t.answers_file for t in targets})
+    parents = find_parents(repo, list(by_branch), answers_files)
     checkouts = git.worktrees(repo)
     tips = {git.rev_parse(repo, branch): branch for branch in by_branch}
     for branch, checkout in checkouts.items():
@@ -71,15 +79,82 @@ def repo_statuses(targets: list[Target], latest: LatestRefs) -> list[BranchStatu
         # being rebased onto is the reliable parent.
         if branch in by_branch and (onto := git.rebase_onto(checkout)) in tips:
             parents[branch] = tips[onto]
-    return [
-        branch_status(by_branch[branch], parents[branch], checkouts.get(branch), latest)
-        for branch in topological_order(parents)
-    ]
+    statuses = []
+    for branch in topological_order(parents):
+        projects = by_branch[branch]
+        subdirs = [t.subdir for t in projects]
+        statuses.extend(
+            branch_status(
+                target,
+                parents[branch],
+                checkouts.get(branch),
+                latest,
+                subdirs,
+                rebase_shown=target is projects[0],
+            )
+            for target in projects
+        )
+    return statuses
+
+
+def _owner(path: str, subdirs: Iterable[str]) -> str:
+    """Find the project `path` (relative to the repo root) belongs to.
+
+    Returns:
+        The directory of the deepest project holding it.
+    """
+    containing = [s for s in subdirs if not s or path.startswith(f"{s}/")]
+    return max(containing, key=len, default="")
+
+
+def _stopped_status(
+    target: Target,
+    parent: str | None,
+    checkout: Path,
+    rebasing: bool,
+    subdirs: Iterable[str],
+) -> tuple[StatusKind, str, list[str]] | None:
+    """Tell whether an update or rebase of `target` stopped in `checkout`.
+
+    Returns:
+        The status kind, detail and unmerged files if one did, else `None`.
+    """
+    unmerged = git.unmerged_files(checkout)
+    if rebasing:
+        return StatusKind.CONFLICTS, f"rebase onto {parent} stopped", unmerged
+    subdirs = list(subdirs)
+    unmerged = [f for f in unmerged if _owner(f, subdirs) == target.subdir]
+    if unmerged:
+        return StatusKind.CONFLICTS, f"in {', '.join(unmerged)}", unmerged
+    if target.answers_file in git.changed_vs_head(checkout):
+        return StatusKind.IN_PROGRESS, "update not committed", []
+    return None
 
 
 def branch_status(
-    target: Target, parent: str | None, checkout: Path | None, latest: LatestRefs
+    target: Target,
+    parent: str | None,
+    checkout: Path | None,
+    latest: LatestRefs,
+    subdirs: Iterable[str] = ("",),
+    rebase_shown: bool = True,
 ) -> BranchStatus:
+    """Compute the status of one project on one branch.
+
+    Args:
+        target: The project.
+        parent: The branch its branch is stacked on, if any.
+        checkout: Where its branch is checked out, if anywhere.
+        latest: The templates' latest versions.
+        subdirs: Every project of the branch, `target`'s included: a conflict
+            counts against the project whose directory holds the file.
+        rebase_shown: Whether a stopped rebase of the branch shows on this
+            project, or blocks it.
+
+    Returns:
+        The project's status.
+    """
+
     def status(
         kind: StatusKind,
         detail: str = "",
@@ -97,24 +172,19 @@ def branch_status(
     except git.GitError as exc:
         return status(StatusKind.ERROR, str(exc))
 
-    if checkout is not None:
-        unmerged = git.unmerged_files(checkout)
-        if git.is_rebasing(checkout):
-            return status(
-                StatusKind.CONFLICTS,
-                f"rebase onto {parent} stopped",
-                latest_ref,
-                unmerged,
-            )
-        if unmerged:
-            return status(
-                StatusKind.CONFLICTS, f"in {', '.join(unmerged)}", latest_ref, unmerged
-            )
-        if ANSWERS_FILE in git.changed_vs_head(checkout):
-            return status(StatusKind.IN_PROGRESS, "update not committed", latest_ref)
+    rebasing = checkout is not None and git.is_rebasing(checkout)
+    if checkout is not None and (not rebasing or rebase_shown):
+        stopped = _stopped_status(target, parent, checkout, rebasing, subdirs)
+        if stopped is not None:
+            kind, detail, unmerged = stopped
+            return status(kind, detail, latest_ref, unmerged)
 
     if target.answers.commit == latest_ref:
         return status(StatusKind.UP_TO_DATE, ref=latest_ref)
+    if rebasing:
+        return status(
+            StatusKind.BLOCKED, f"waiting for the rebase onto {parent}", latest_ref
+        )
     if checkout is not None and not git.is_clean(checkout):
         return status(StatusKind.BLOCKED, "commit or stash first", latest_ref)
     detail = f"rebase onto {parent}" if parent else ""

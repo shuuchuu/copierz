@@ -71,6 +71,7 @@ def test_json_output_for_agents(
     assert branch | {"template": None} == {
         "repo": str(project),
         "branch": "main",
+        "subproject": None,
         "template": None,
         "status": "behind",
         "current": "0.1.0",
