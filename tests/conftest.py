@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from typing import TYPE_CHECKING
 
@@ -15,6 +16,13 @@ ANSWERS_TEMPLATE = """\
 _commit: {commit}
 _src_path: {src_path}
 """
+
+
+# Git exports these to hooks, so tests run from the pre-commit hook would point
+# every test repo at the outer repo's index. Cleared on import, before copier's
+# plumbum snapshots the environment.
+for _name in ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"):
+    os.environ.pop(_name, None)
 
 
 def _git(repo: Path, *args: str) -> None:
