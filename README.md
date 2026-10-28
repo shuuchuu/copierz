@@ -14,8 +14,12 @@ copierz reads `~/.config/copierz/config.toml` (or `$XDG_CONFIG_HOME`, or
 roots = ["~/repos"]
 
 # Repos (`path`) or single branches (`path@branch`) to leave alone.
-exclude = ["~/repos/shuuchuu/old-thing"]
+exclude = ["~/repos/shuuchuu/old-thing", "*@backup/*"]
 ```
+
+Exclude entries take shell wildcards, `*` matching `/` too: `*@backup/*`
+leaves out every `backup/` branch of every repo, which `update` would
+otherwise bring up to date like any other.
 
 There's no list of repos to maintain: on every run copierz scans the roots
 for git repos, and every local branch of each (via `git show

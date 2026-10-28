@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 
@@ -20,14 +21,19 @@ class Config:
         roots: Directories scanned recursively for git repos on every run.
         exclude: Repos (`/path/to/repo`) or single branches
             (`/path/to/repo@branch`) to ignore even though they carry a
-            Copier answers file.
+            Copier answers file. Either part may use shell wildcards, where
+            `*` also matches `/`: `*@backup/*` leaves out every `backup/`
+            branch.
     """
 
     roots: list[Path] = field(default_factory=list)
     exclude: list[str] = field(default_factory=list)
 
     def is_excluded(self, repo: Path, branch: str) -> bool:
-        return str(repo) in self.exclude or f"{repo}@{branch}" in self.exclude
+        return any(
+            fnmatchcase(str(repo), pattern) or fnmatchcase(f"{repo}@{branch}", pattern)
+            for pattern in self.exclude
+        )
 
 
 def default_config_path() -> Path:
@@ -42,7 +48,9 @@ def default_cache_dir() -> Path:
 
 def _expand(raw: str) -> str:
     path, sep, branch = raw.partition("@")
-    return str(Path(path).expanduser().resolve()) + sep + branch
+    if not path.startswith(("*", "?", "[")):  # Else a pattern for any repo.
+        path = str(Path(path).expanduser().resolve())
+    return path + sep + branch
 
 
 def load_config(path: Path | None = None) -> Config:

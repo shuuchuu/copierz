@@ -26,6 +26,21 @@ def test_roots_and_exclude_are_expanded(tmp_path: Path) -> None:
     assert not config.is_excluded(tmp_path / "y", "other")
 
 
+def test_exclude_patterns(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        f'exclude = ["*@backup/*", "{tmp_path}/old-*", "~/repos/*@scratch"]\n'
+    )
+
+    config = load_config(config_path)
+
+    assert config.is_excluded(tmp_path / "any", "backup/main-2026-10-22")
+    assert not config.is_excluded(tmp_path / "any", "main")
+    assert config.is_excluded(tmp_path / "old-thing", "main")
+    assert config.is_excluded(Path.home() / "repos" / "a" / "b", "scratch")
+    assert not config.is_excluded(Path.home() / "repos" / "a", "scratch-2")
+
+
 def test_old_format_is_rejected(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text('[[repos]]\npath = "/x"\ntemplate = "t"\n')
