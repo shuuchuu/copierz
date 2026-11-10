@@ -156,3 +156,11 @@ conflicts to resolve.
 Conflicts come out exactly as a `git merge` conflict would (Copier runs a
 real 3-way `git merge-file` under the hood): conflict markers in the file,
 and the file listed as unmerged by `git status`.
+
+## Releasing
+
+1. `uv run bumpver update --minor` (or `--patch`, `--major`): bumps, commits, tags
+   and pushes.
+2. `uv run doit publish`: builds and uploads to PyPI with the token of
+   `creds.env`, a gitignored file at the repository's root holding one line,
+   `export UV_PUBLISH_TOKEN=pypi-...`, readable by you only (`chmod 400`).

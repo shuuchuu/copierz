@@ -24,6 +24,22 @@ def task_test():
     }
 
 
+def task_publish():
+    """Build and upload a release to PyPI, with the token of creds.env.
+
+    creds.env (gitignored) holds one line: export UV_PUBLISH_TOKEN=pypi-...
+    """
+    return {
+        "actions": [
+            "test -f creds.env || { echo 'creds.env is missing: write"
+            " export UV_PUBLISH_TOKEN=pypi-... in it (see README.md)' >&2; exit 1; }",
+            "rm -rf dist && uv build",
+            ". ./creds.env && uv publish",
+        ],
+        "verbosity": 2,
+    }
+
+
 def task_install_hooks():
     import subprocess
 
